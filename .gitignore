@@ -1,0 +1,53 @@
+# Planning docs (local only)
+roadmap.md
+checklist.md
+
+# Binaries
+/bin/
+/dist/
+/workloadguard
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage output
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Go workspace
+go.work
+go.work.sum
+vendor/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Kubernetes / kind local artifacts
+kubeconfig
+*.kubeconfig
+.kube/
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+tmp/
+.tmp/
