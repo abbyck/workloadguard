@@ -37,6 +37,7 @@ type Defaults struct {
 }
 
 // Change is one field the tool sets. Before is nil: the tool only fills unset fields.
+// In an undo plan it's the reverse: Before is the tool's value and After is nil.
 type Change struct {
 	// Container is the container name, or "" for a pod-level field.
 	Container string `json:"container"`
@@ -85,7 +86,10 @@ type Skipped struct {
 
 // Plan is the result of planning or applying hardening.
 type Plan struct {
-	Level     Level          `json:"level"`
+	Level Level `json:"level,omitempty"`
+	// Undo is true for an undo plan: each change's before is what the tool set, after is
+	// nil (removed).
+	Undo      bool           `json:"undo,omitempty"`
 	DryRun    bool           `json:"dryRun"`
 	Workloads []WorkloadPlan `json:"workloads"`
 	Skipped   []Skipped      `json:"skipped"`

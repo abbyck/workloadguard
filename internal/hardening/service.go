@@ -125,7 +125,10 @@ func (s *Service) namespace(ctx context.Context, ns string, level Level, dryRun 
 				plan.Skipped = append(plan.Skipped, Skipped{WorkloadRef: ref, Reason: err.Error()})
 				continue
 			}
-			if wp := s.workload(ctx, k, o, level, skipResources, dryRun); wp != nil {
+			build := func(cur object) ([]Change, []string, []byte, error) {
+				return s.buildPatch(k, cur, level, skipResources)
+			}
+			if wp := s.workload(ctx, k, o, build, dryRun); wp != nil {
 				plan.Workloads = append(plan.Workloads, *wp)
 			} else {
 				plan.Unchanged = append(plan.Unchanged, ref)
@@ -135,8 +138,12 @@ func (s *Service) namespace(ctx context.Context, ns string, level Level, dryRun 
 	return s.reportOnly(ctx, ns, level, skipResources, plan)
 }
 
-// workload plans or applies one workload. It returns nil if nothing needs changing.
-func (s *Service) workload(ctx context.Context, k kind, o object, level Level, skipResources, dryRun bool) *WorkloadPlan {
+// patchBuilder works out the changes to a workload and the patch that makes them.
+type patchBuilder func(o object) (changes []Change, notes []string, patch []byte, err error)
+
+// workload plans or applies one workload, hardening or undo depending on build. It returns
+// nil if nothing needs changing.
+func (s *Service) workload(ctx context.Context, k kind, o object, build patchBuilder, dryRun bool) *WorkloadPlan {
 	wp := &WorkloadPlan{WorkloadRef: WorkloadRef{Kind: k.name, Namespace: o.GetNamespace(), Name: o.GetName()}}
 	opts := metav1.PatchOptions{FieldManager: fieldManager}
 	if dryRun {
@@ -153,7 +160,7 @@ func (s *Service) workload(ctx context.Context, k kind, o object, level Level, s
 				return err
 			}
 		}
-		changes, notes, patch, err := s.buildPatch(k, cur, level, skipResources)
+		changes, notes, patch, err := build(cur)
 		wp.Changes, wp.Notes = changes, notes
 		if err != nil || len(changes) == 0 {
 			return err
@@ -165,7 +172,13 @@ func (s *Service) workload(ctx context.Context, k kind, o object, level Level, s
 	if len(wp.Changes) == 0 && err == nil {
 		return nil
 	}
-	wp.RestartsPods = len(wp.Changes) > 0
+	// Only pod template changes restart pods; an annotation-only change (undo with every
+	// field drifted) doesn't.
+	for _, c := range wp.Changes {
+		if !strings.HasPrefix(c.Field, "metadata.") {
+			wp.RestartsPods = true
+		}
+	}
 	switch {
 	case err != nil:
 		wp.Error = err.Error()
@@ -208,20 +221,26 @@ func (s *Service) buildPatch(k kind, o object, level Level, skipResources bool) 
 	ann[ChangesAnnotation] = string(record)
 	modified.SetAnnotations(ann)
 
-	before, err := json.Marshal(o)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	after, err := json.Marshal(modified)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	patch, err := strategicpatch.CreateTwoWayMergePatch(before, after, k.schema)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("compute patch: %w", err)
-	}
-	patch, err = withResourceVersion(patch, o.GetResourceVersion())
+	patch, err := diffPatch(k, o, modified)
 	return changes, notes, patch, err
+}
+
+// diffPatch returns a strategic merge patch from before to after, carrying before's
+// resourceVersion so the API server rejects it with a conflict if the object changed since.
+func diffPatch(k kind, before, after object) ([]byte, error) {
+	b, err := json.Marshal(before)
+	if err != nil {
+		return nil, err
+	}
+	a, err := json.Marshal(after)
+	if err != nil {
+		return nil, err
+	}
+	patch, err := strategicpatch.CreateTwoWayMergePatch(b, a, k.schema)
+	if err != nil {
+		return nil, fmt.Errorf("compute patch: %w", err)
+	}
+	return withResourceVersion(patch, before.GetResourceVersion())
 }
 
 func withResourceVersion(patch []byte, rv string) ([]byte, error) {

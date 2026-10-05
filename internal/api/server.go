@@ -39,8 +39,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/isolations", s.listIsolations)
 	mux.HandleFunc("GET /v1/isolations/{id}", s.getIsolation)
 	mux.HandleFunc("DELETE /v1/isolations/{id}", s.deleteIsolation)
-	mux.HandleFunc("POST /v1/hardening/plan", s.planHardening)
-	mux.HandleFunc("POST /v1/hardening/apply", s.applyHardening)
+	if s.hardening != nil {
+		mux.HandleFunc("POST /v1/hardening/plan", s.planHandler("hardening", s.hardening.Plan))
+		mux.HandleFunc("POST /v1/hardening/apply", s.applyHandler("hardening", s.hardening.Apply))
+		mux.HandleFunc("POST /v1/hardening/undo/plan", s.planHandler("undo", s.hardening.UndoPlan))
+		mux.HandleFunc("POST /v1/hardening/undo/apply", s.applyHandler("undo", s.hardening.UndoApply))
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no route for "+r.Method+" "+r.URL.Path)
 	})

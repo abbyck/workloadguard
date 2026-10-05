@@ -121,6 +121,7 @@ Example request bodies are in [examples/requests/](examples/requests/).
 | `DELETE /v1/isolations/{id}` | Turn isolation off. |
 | `POST /v1/hardening/plan` | Dry run: show what hardening would change. Changes nothing. |
 | `POST /v1/hardening/apply` | Apply the same plan and report the result per workload. |
+| `POST /v1/hardening/undo/plan`, `/undo/apply` | Show, then revert, what hardening set (see [Undo](#undo)). |
 | `GET /healthz`, `GET /readyz` | Liveness, and readiness (the Kubernetes API is reachable). |
 
 ### Isolation
@@ -507,7 +508,7 @@ Without the settle check, the tool reported that as `ready`.
 The tool reports a failed rollout. It doesn't roll it back. For Deployments, the old pods
 keep serving whenever the new ones never become available, as happened with `partial`.
 
-#### Undo (designed, not built)
+#### Undo
 
 Every patched workload records what was changed, in annotations:
 
@@ -515,18 +516,28 @@ Every patched workload records what was changed, in annotations:
   Later runs add to it, for example baseline and then strict.
 - `workloadguard.io/hardened-at` and `workloadguard.io/hardening-level`.
 
-An undo endpoint, `POST /v1/hardening/undo` with the same body, would:
+`POST /v1/hardening/undo/plan` and `/undo/apply` take the same body as hardening, minus
+the level. For each recorded change:
 
-1. Read the annotation, and for each change check that the field **still holds the value the
-   tool set**. If someone has changed it since, leave it and report it. Undo must not revert
-   someone else's later edit.
-2. Build a patch that removes the remaining fields. `before` is always `null`, so undo means
-   deleting the field. Send it with the `resourceVersion`, like apply.
-3. Remove the annotations, and offer the same plan/apply split as hardening.
+- The field is removed **only if it still holds the value the tool set**. If someone has
+  changed it since, it's theirs now: it's left alone and reported in `notes`. Undo must not
+  revert someone else's later edit.
+- Quantities compare by value, so `500m` equals `0.5`.
+- A container that no longer exists is reported, not an error.
 
-One caveat: if the workload is managed by GitOps (Argo CD, Flux), the controller reverts the
-patch on its next sync anyway. Hardening and undo there are only a stopgap; the real fix
-belongs in the source manifests.
+Structs and maps the revert leaves empty are dropped. So the spec returns to exactly what it
+was, not to one with an extra `securityContext: {}`. Then the annotations are removed. If
+every field has drifted, only the annotations are removed, which restarts nothing.
+
+Undo goes through the same path as apply: a strategic merge patch with the
+`resourceVersion`, conflict retries, per-workload results and rollout status.
+
+I checked it on kind: hardening `legacy` and then undoing it left both pod templates
+identical to the originals.
+
+One caveat: if the workload is managed by GitOps (Argo CD, Flux), the controller reverts
+hardening on its next sync anyway. Hardening and undo there are only a stopgap; the real
+fix belongs in the source manifests.
 
 ### Never-touch list
 
@@ -690,7 +701,6 @@ alone.
 - **It restarts pods and doesn't roll back.** A failed rollout is reported, not undone.
 - **GitOps reverts the patch.** Argo CD or Flux will undo it on the next sync; the real fix
   belongs in the source manifests.
-- **Undo isn't built** (designed above).
 - **The defaults are flat values**, not based on observed usage. Something like the Vertical
   Pod Autoscaler's recommendations would be better.
 - **The settle check is a heuristic.** It watches pods for 10 seconds after a rollout, so a
@@ -725,7 +735,7 @@ alone.
    created instead of patched afterwards.
 4. Refuse isolation for host-network pods, and emit Kubernetes Events for every action.
 5. Integration tests in Go against kind, run in CI.
-6. The bonus items: hardening undo, a metrics endpoint, a Helm chart.
+6. The remaining bonus items.
 
 ## Time taken
 
