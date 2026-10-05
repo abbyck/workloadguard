@@ -129,6 +129,9 @@ func TestDecode(t *testing.T) {
 		{"content type with charset", "application/json; charset=utf-8", `{"namespace":"tenant-a"}`, 0},
 		// A typo must not silently become an empty selector, which would match every pod.
 		{"unknown field rejected", "application/yaml", "namespace: tenant-a\nselecter:\n  app: gateway\n", http.StatusBadRequest},
+		// encoding/json would accept these, matching field names case-insensitively.
+		{"field name in the wrong case rejected", "application/json", `{"namespace":"tenant-a","Selector":{"app":"gateway"}}`, http.StatusBadRequest},
+		{"duplicate key rejected", "application/yaml", "namespace: tenant-a\nnamespace: tenant-b\n", http.StatusBadRequest},
 		{"malformed", "application/json", `{"namespace":`, http.StatusBadRequest},
 		{"empty", "application/json", "", http.StatusBadRequest},
 		{"unsupported content type", "text/plain", "namespace: tenant-a", http.StatusUnsupportedMediaType},

@@ -7,7 +7,9 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 
+	kjson "sigs.k8s.io/json"
 	"sigs.k8s.io/yaml"
 
 	"github.com/abbyck/workloadguard/internal/guard"
@@ -81,8 +83,11 @@ func writeRequestError(w http.ResponseWriter, err error) {
 	}
 }
 
-// decode reads a JSON or YAML request body into v. Unknown fields are rejected, so a typo
-// like "selecter" fails loudly instead of silently becoming an empty selector.
+// decode reads a JSON or YAML request body into v, as strictly as the Kubernetes API server
+// does: unknown fields, duplicate keys and field names in the wrong case are rejected, so a
+// typo like "selecter" or "allpods" fails loudly instead of being dropped or guessed at.
+// (encoding/json alone matches field names case-insensitively, even with
+// DisallowUnknownFields.)
 func decode(r *http.Request, v any) error {
 	switch ct := r.Header.Get("Content-Type"); mediaType(ct) {
 	case "", "application/json", "application/yaml", "application/x-yaml", "text/yaml":
@@ -103,9 +108,21 @@ func decode(r *http.Request, v any) error {
 	if len(body) == 0 {
 		return &requestError{http.StatusBadRequest, "empty_body", "request body is empty"}
 	}
-	// JSON is valid YAML, so one strict parser covers both content types.
-	if err := yaml.UnmarshalStrict(body, v); err != nil {
+	// JSON is valid YAML, so one parser covers both content types.
+	j, err := yaml.YAMLToJSONStrict(body)
+	if err != nil {
 		return &requestError{http.StatusBadRequest, "bad_body", "parsing request body: " + err.Error()}
+	}
+	strictErrs, err := kjson.UnmarshalStrict(j, v)
+	if err != nil {
+		return &requestError{http.StatusBadRequest, "bad_body", "parsing request body: " + err.Error()}
+	}
+	if len(strictErrs) > 0 {
+		msgs := make([]string, len(strictErrs))
+		for i, e := range strictErrs {
+			msgs[i] = e.Error()
+		}
+		return &requestError{http.StatusBadRequest, "bad_body", "parsing request body: " + strings.Join(msgs, "; ")}
 	}
 	return nil
 }
