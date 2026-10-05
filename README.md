@@ -16,8 +16,10 @@ inspect it with `kubectl` without the tool. It is built with plain client-go and
 Prerequisites, with the versions this was built and tested with:
 
 - Go 1.27 (only for `make test` / `make vet`; the image builds in Docker)
-- Docker 29
-- kind 0.24 or later, for NetworkPolicy enforcement by its default CNI (tested with 0.33)
+- Docker (tested with 29)
+- kind v0.33. The cluster config pins kind v0.33's node image (Kubernetes 1.37), and kind
+  only guarantees a node image with the kind release it was built for. Any kind from v0.24
+  enforces NetworkPolicy with its default CNI.
 - kubectl (tested with 1.37)
 - Internet access, to pull the kind node image and the sample images
 
@@ -83,7 +85,9 @@ helm install workloadguard charts/workloadguard -n workloadguard
 ```
 
 Values cover the image, protected namespaces, pod CIDRs, hardening defaults and rollout
-timeout, shutdown timeout, log level and resources. Replicas aren't a value; the tool runs
+timeout, shutdown timeout, log level, resources, the NetworkPolicy (with an `ingressFrom`
+list, say for a Prometheus namespace), pod annotations, node selector, tolerations and
+affinity. `values.schema.json` rejects unknown keys and malformed values at install time. Replicas aren't a value; the tool runs
 one on purpose. `hack/verify.sh` passes against a Helm install too.
 
 ### Repository layout
@@ -170,13 +174,13 @@ Response:
 
 ```json
 {
-  "id": "iso-3f9a2c1b",
+  "id": "iso-13893ed2ba",
   "a": {"namespace": "tenant-a", "selector": {"app": "gateway"}},
   "b": {"namespace": "tenant-b", "selector": {"app": "dashboard"}},
-  "createdAt": "2026-10-05T12:00:00Z",
+  "createdAt": "2026-10-05T12:09:38Z",
   "policies": [
-    {"namespace": "tenant-a", "name": "workloadguard-iso-3f9a2c1b"},
-    {"namespace": "tenant-b", "name": "workloadguard-iso-3f9a2c1b"}
+    {"namespace": "tenant-a", "name": "workloadguard-iso-13893ed2ba-a"},
+    {"namespace": "tenant-b", "name": "workloadguard-iso-13893ed2ba-b"}
   ],
   "warnings": []
 }
@@ -184,7 +188,8 @@ Response:
 
 - **The ID is derived from the request**, as a hash of both sides. Sending the same request again
   returns `200` with the existing isolation instead of creating a second one (`201` the first time).
-  Swapping `a` and `b` gives the same ID.
+  Swapping `a` and `b` gives the same ID, so the response lists the sides in a fixed order,
+  which may not be the order you sent.
 - **Selectors are exact label matches** (`matchLabels`). `matchExpressions` aren't supported,
   because the tool has to build "everything except these pods", and negating arbitrary
   expressions gets error-prone fast.
@@ -193,6 +198,8 @@ Response:
 - **Existing NetworkPolicies on the targets block the request** with `409` and a list of those
   policies. Adding isolation on top of them would widen access, because NetworkPolicies are
   combined with OR. See [Existing NetworkPolicies](#existing-networkpolicies-are-refused-not-merged).
+- **Host-network pods are refused** with `422`. NetworkPolicy doesn't apply to them, so
+  isolating one would report success and block nothing.
 - **`warnings`** flags things that are allowed but suspicious, such as a selector that currently
   matches no pods.
 
@@ -231,6 +238,9 @@ Plan response (trimmed; this is the real output for the sample `legacy` namespac
         {"container": "web", "field": "resources.requests.cpu", "before": null, "after": "50m"},
         {"container": "web", "field": "resources.requests.memory", "before": null, "after": "64Mi"},
         {"container": "web", "field": "resources.limits.memory", "before": null, "after": "256Mi"}
+      ],
+      "notes": [
+        "container web gets a 256Mi memory limit; if it uses more it will be OOM-killed, possibly long after the rollout. Check its usage first (kubectl top pod --containers)"
       ]
     }
   ],
@@ -242,8 +252,8 @@ Plan response (trimmed; this is the real output for the sample `legacy` namespac
 
 - `container: ""` is a pod-level field. `before` is always `null`, because the tool only fills
   unset fields.
-- `skipped` lists workloads it won't patch, with the reason: bare Pods, Jobs, CronJobs, or
-  anything labeled `workloadguard.io/ignore=true`.
+- `skipped` lists workloads it won't patch, with the reason: bare Pods, Jobs, CronJobs,
+  workloads managed by an operator, or anything labeled `workloadguard.io/ignore=true`.
 - `unchanged` lists workloads that already meet the level.
 - `notes` on a workload say what was deliberately left alone, or what the level might break.
 
@@ -268,6 +278,7 @@ even if something changed since the dry run.
 | `workloadguard_hardening_workloads_total` | counter | `operation` (`hardening`/`undo`), `result` (`patched`/`failed`) | |
 | `workloadguard_kube_api_requests_total` | counter | `method`, `code` | Every Kubernetes API call, through client-go's metrics hooks. A rise in `403` means missing RBAC |
 | `workloadguard_kube_api_request_duration_seconds` | histogram | `verb` | |
+| `workloadguard_build_info` | gauge | `version`, `goversion` | Always 1; tells you which build is running (also `--version` and the startup log) |
 
 Plus the standard Go runtime and process metrics.
 
@@ -281,7 +292,9 @@ Errors return a JSON body: `{"error": {"code": "namespace_not_found", "message":
 | `403` | The request targets a protected namespace or workload (system namespaces, the tool's own, or labeled `workloadguard.io/ignore=true`) |
 | `404` | Unknown isolation ID on `GET` |
 | `409` | Isolation would combine with existing NetworkPolicies on the targets |
-| `500` / `503` | The Kubernetes API failed or is unreachable. The body says what, if anything, was already changed. |
+| `422` | The targets can't be isolated with NetworkPolicy (a matching pod uses `hostNetwork`) |
+| `500` | A Kubernetes API call failed. The body says what, if anything, was already changed. |
+| `503` | Only from `/readyz`: the Kubernetes API is unreachable. |
 
 ### Why an HTTP API and not a CRD
 
@@ -292,9 +305,12 @@ its edge cases. For this assignment, an imperative API built on plain client-go 
 budget and keeps the logic easy to follow. All state still lives in the cluster as labeled
 objects, so moving to a CRD later would mostly mean replacing the HTTP layer.
 
-The API has no authentication. It's reachable only from inside the cluster or through
-`kubectl port-forward`, which already requires cluster access. In production it would need
-authentication and authorization, or the CRD approach above.
+The API has no authentication, so a NetworkPolicy in the tool's namespace blocks all
+ingress: no pod can call it. Before I added it, any pod in the cluster could reach the
+Service and get the tool to patch workloads it had no rights to; I checked that on kind.
+`kubectl port-forward` still works, because it connects inside the pod's network namespace,
+and it already requires cluster access. In production the API would need authentication
+and authorization, or the CRD approach above.
 
 ## Decisions
 
@@ -376,10 +392,11 @@ the old policy allowed.
 same workload would cancel each other out. The tool refuses the second instead.
 
 The trade-off: you can't isolate a workload that already has NetworkPolicies, or isolate
-one workload from two peers at once. The production answer is
-[AdminNetworkPolicy](https://network-policy-api.sigs.k8s.io/) or CNI-specific policies
-(Calico, Cilium). Those have real deny rules that take priority over NetworkPolicies
-instead of being combined with them.
+one workload from two peers at once. The production answer is a policy API with real deny
+rules that take priority over NetworkPolicies instead of being combined with them:
+[ClusterNetworkPolicy](https://network-policy-api.sigs.k8s.io/) (v1alpha2, which replaced
+AdminNetworkPolicy in 2026 and is heading for beta), or CNI-specific policies (Calico,
+Cilium).
 
 #### Turning isolation off
 
@@ -430,7 +447,12 @@ bugs come from.
 | Kind | What happens | Why |
 |---|---|---|
 | Deployment, StatefulSet, DaemonSet | **Patched** (pod template) | Their controllers roll the change out to new pods. |
-| Pod with an owner (ReplicaSet etc.) | Ignored | Its controller is patched instead; editing the pod would be reverted. |
+| Deployment, StatefulSet, DaemonSet owned by another controller (an operator's custom resource) | Skipped, naming the owner | The operator would put its own template back, so a patch would only cause repeated rollouts. Harden it through the owning resource. |
+| ReplicaSet owned by a Deployment, and its pods | Ignored | Covered by patching the Deployment. |
+| ReplicaSet with no owner, or another owner (e.g. Argo Rollouts) | **Reported**, not patched | Nothing here would patch it correctly; fix its manifest or owner. |
+| Pod owned by a StatefulSet, DaemonSet or Job | Ignored | Covered by its controller's row. |
+| Pod owned by anything else (an operator creating pods directly) | **Reported**, not patched | Set the fields through the owner. |
+| Static pod (owned by a Node) | Ignored | It comes from a file on the node; the API can't change it. |
 | Bare Pod (no owner) | **Reported**, not patched | Most securityContext fields can't change on a running pod, and nothing would recreate it. |
 | Job | **Reported**, not patched | A Job's pod template can't be changed. |
 | CronJob | **Reported**, not patched | It could be patched, but it's out of scope here; fix its manifest. |
@@ -510,6 +532,11 @@ everything else on its node. Both are configurable by flag.
 - **Namespaces with a LimitRange that sets container defaults** keep resources untouched.
   The LimitRange already applies them at admission, and it's the namespace owner's call.
   The plan says so in `notes`.
+- **A new memory limit is the riskiest change.** A container that really uses more than
+  256Mi will be OOM-killed, possibly hours after the rollout, long after the settle check.
+  So the plan adds a note to every container that gets one, telling the operator to check
+  its usage first (`kubectl top pod --containers`). Setting the limit from observed usage
+  is on the more-time list.
 
 #### Seeing what would change
 
@@ -570,9 +597,12 @@ Undo goes through the same path as apply: a strategic merge patch with the
 I checked it on kind: hardening `legacy` and then undoing it left both pod templates
 identical to the originals.
 
-One caveat: if the workload is managed by GitOps (Argo CD, Flux), the controller reverts
-hardening on its next sync anyway. Hardening and undo there are only a stopgap; the real
-fix belongs in the source manifests.
+**GitOps and drift.** I checked on kind what re-applying the original manifest does to the
+fields hardening added. With `kubectl apply` (client-side, Argo CD's default) and with
+server-side apply (how Flux applies), they **stay**: both only manage the fields in the
+manifest. With `kubectl replace`, or a sync that deletes and recreates, they're lost. So
+GitOps usually doesn't undo hardening, but the cluster silently drifts from Git: the
+hardened values exist only in the cluster. The real fix belongs in the source manifests.
 
 ### Never-touch list
 
@@ -607,8 +637,9 @@ apart.
   request reports them as unchanged.
 - **The tool passes its own checks.** Its pod runs as non-root with a read-only root
   filesystem, all capabilities dropped and the RuntimeDefault seccomp profile, with
-  resources and probes set. Its namespace enforces Pod Security Admission `restricted`, and
-  a hardening plan against it, at both levels, finds nothing to change.
+  resources and probes set. Its namespace enforces Pod Security Admission `restricted`, a
+  hardening plan against it, at both levels, finds nothing to change, and a NetworkPolicy
+  blocks all ingress (see [Why an HTTP API](#why-an-http-api-and-not-a-crd)).
 - **Least-privilege RBAC, cluster-scoped.** Isolation and hardening target namespaces chosen
   per request, so the role can't be namespaced. Every rule maps to an API call the tool
   makes, with no wildcards:
@@ -621,6 +652,7 @@ apart.
   | limitranges | list | Leave resources to a LimitRange with defaults |
   | networkpolicies | get, list, create, patch, delete | Isolation on (server-side apply needs `create` for new objects), off, conflicts |
   | deployments, statefulsets, daemonsets | get, list, patch | Hardening and rollout status |
+  | replicasets | list | Reported only, unless owned by a Deployment |
   | jobs, cronjobs | list | Reported only |
 
   Testing in the cluster caught one gap: server-side apply of a new NetworkPolicy also
@@ -707,8 +739,8 @@ namespaces they delete afterwards. They cover what the fake clientset can't:
 - **Concurrency:** a patch built before someone else's edit is refused by the API server
   with a `Conflict`, because it carries the old `resourceVersion`.
 
-They aren't in CI, which would need a kind cluster per run. `make integration` runs them
-and then `hack/verify.sh`.
+`make integration` runs them and then `hack/verify.sh`. CI does the same in its `e2e` job,
+on a fresh kind cluster for every push.
 
 ### End-to-end: `hack/verify.sh`
 
@@ -732,16 +764,17 @@ alone.
 - **NetworkPolicy is L3/L4, and the CNI enforces it.** "No traffic at all" holds only as far
   as the CNI implements the spec. Connections open before isolation may survive on CNIs that
   only check new connections, so restart the pods if that matters.
-- **Host-network pods aren't covered.** NetworkPolicy doesn't apply to `hostNetwork` pods,
-  and their traffic looks like node traffic, which the `ipBlock` allows. The tool doesn't yet
-  detect a host-network pod on either side; it should refuse.
+- **Host-network pods can't be isolated.** NetworkPolicy doesn't apply to them, and their
+  traffic carries the node's IP, which the `ipBlock` allows. The tool refuses a request
+  whose selector matches one (`422`), but a host-network pod that starts matching later
+  isn't caught.
 - **Traffic through a NodePort or LoadBalancer can get around it.** With
   `externalTrafficPolicy: Cluster`, kube-proxy may rewrite the source address to a node IP,
   which the `ipBlock` allows. The same goes for traffic relayed through a third pod. The
   tool blocks direct pod-to-pod traffic only.
 - **Workloads with existing NetworkPolicies can't be isolated**, and neither can one workload
   from two peers at once. The tool refuses rather than silently widening access.
-  AdminNetworkPolicy or CNI deny policies would remove this limit.
+  ClusterNetworkPolicy or CNI deny policies would remove this limit.
 - **Policies added after isolation aren't watched.** If someone later adds a NetworkPolicy
   that selects an isolated pod, its allow rules combine with isolation and can reopen
   traffic. The opt-out label is likewise only checked when the request is made.
@@ -755,8 +788,11 @@ alone.
   be seen through the API. That's why baseline is below Pod Security Standards
   `restricted` and strict is opt-in.
 - **It restarts pods and doesn't roll back.** A failed rollout is reported, not undone.
-- **GitOps reverts the patch.** Argo CD or Flux will undo it on the next sync; the real fix
-  belongs in the source manifests.
+- **It creates drift from Git.** Argo CD and Flux usually leave the added fields alone, so
+  the cluster no longer matches the manifests, and a delete-and-recreate sync loses the
+  hardening. The real fix belongs in the source manifests (see [Undo](#undo)).
+- **Apply restarts every selected workload at once.** Each rolls out with its own strategy,
+  but they all start together. Hardening a busy namespace is best done in a quiet period.
 - **The defaults are flat values**, not based on observed usage. Something like the Vertical
   Pod Autoscaler's recommendations would be better.
 - **The settle check is a heuristic.** It watches pods for 10 seconds after a rollout, so a
@@ -769,14 +805,14 @@ alone.
 
 ### The service
 
-- **No authentication or authorization on the API.** It's reachable only inside the cluster
-  or through `kubectl port-forward`, which already needs cluster access. Anyone who can
-  port-forward can isolate or patch.
+- **No authentication or authorization on the API.** A NetworkPolicy stops other pods from
+  reaching it, so the way in is `kubectl port-forward`, which already needs cluster access.
+  But anyone who can port-forward to the tool can isolate or patch with its permissions.
 - **The audit trail is the logs plus the labels and annotations on what the tool touched.**
   It doesn't emit Kubernetes Events.
 - **One replica**, so requests fail while the pod is being replaced.
-- **Integration tests aren't in CI.** They and `hack/verify.sh` need the kind cluster and
-  are run by hand with `make integration`.
+- **The end-to-end CI job builds a whole kind cluster** on every push, which takes a few
+  minutes. A larger project would run it less often, for example on pull requests only.
 
 ### What I'd do with more time
 
@@ -784,13 +820,17 @@ alone.
    resources). Requests become declarative and RBAC-controlled. The controller can
    reconcile drift, such as deleted policies or new conflicting ones, and the history lives
    in the cluster.
-2. **AdminNetworkPolicy** (or Cilium/Calico policies) for isolation. Real deny rules remove
-   the conflict limitation and the `ipBlock`/pod-CIDR coupling.
+2. **ClusterNetworkPolicy** (formerly AdminNetworkPolicy), or Cilium/Calico policies, for
+   isolation. Real deny rules remove the conflict limitation and the `ipBlock`/pod-CIDR
+   coupling.
 3. **Admission-time enforcement** with Pod Security Admission, Kyverno or
    ValidatingAdmissionPolicy, so unhardened workloads are stopped or fixed when they're
    created instead of patched afterwards.
-4. Refuse isolation for host-network pods, and emit Kubernetes Events for every action.
-5. Run the integration tests and `verify.sh` in CI, with a kind cluster per run.
+4. Emit Kubernetes Events for every action, and watch for host-network pods or new
+   policies that start matching an active isolation.
+5. Set memory limits from observed usage (metrics-server or VPA recommendations) instead
+   of a flat default, and let hardening target a label selector, not only whole namespaces,
+   so it can be rolled out gradually.
 
 ## Feedback on the brief
 
