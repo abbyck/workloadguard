@@ -1,0 +1,27 @@
+# No resources and no securityContext at all. Baseline hardening should fill everything in
+# and the app should keep running. The image already runs as a non-root user (uid 101) on
+# port 8080, so dropping all capabilities doesn't break it. Strict hardening
+# (readOnlyRootFilesystem) WOULD break it, because nginx writes to /tmp.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unhardened
+  namespace: legacy
+  labels:
+    app: unhardened
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unhardened
+  template:
+    metadata:
+      labels:
+        app: unhardened
+    spec:
+      containers:
+        - name: web
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 8080

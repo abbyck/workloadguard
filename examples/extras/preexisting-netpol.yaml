@@ -1,0 +1,26 @@
+# Tricky case for isolation (R2.4). Not part of examples/kustomization.yaml.
+#
+# dashboard only accepts traffic from the bystander. Because NetworkPolicies are unioned,
+# naively adding an "allow everything except tenant-a" policy on top of this would OPEN
+# dashboard to every other namespace. workloadguard should detect this policy and refuse
+# (or require force) instead of silently widening access.
+#
+#   kubectl --context kind-workloadguard apply -f examples/extras/preexisting-netpol.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dashboard-allow-bystander-only
+  namespace: tenant-b
+spec:
+  podSelector:
+    matchLabels:
+      app: dashboard
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: shared
+          podSelector:
+            matchLabels:
+              app: bystander

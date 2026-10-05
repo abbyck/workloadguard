@@ -1,0 +1,41 @@
+# Some values set on purpose. Hardening must keep every one of them and only fill the gaps:
+#   - web: cpu/memory requests set, no memory limit -> keep requests, add limit >= request
+#   - web: allowPrivilegeEscalation already false, runAsUser set -> keep both
+#   - web: capabilities.add NET_BIND_SERVICE -> must not be removed (never loosen, never break)
+#   - init: initContainer with nothing set -> must be covered too
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: partial
+  namespace: legacy
+  labels:
+    app: partial
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: partial
+  template:
+    metadata:
+      labels:
+        app: partial
+    spec:
+      initContainers:
+        - name: init
+          image: busybox:1.37
+          command: ["sh", "-c", "echo init done"]
+      containers:
+        - name: web
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            runAsUser: 101
+            allowPrivilegeEscalation: false
+            capabilities:
+              add: ["NET_BIND_SERVICE"]
