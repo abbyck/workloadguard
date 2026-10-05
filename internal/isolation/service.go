@@ -50,6 +50,8 @@ type Service struct {
 	podCIDRs []netip.Prefix
 }
 
+// NewService returns a Service. podCIDRs must cover every pod IP in the cluster; they're
+// excluded from the ipBlock rule, and checked against the nodes on every request.
 func NewService(client kubernetes.Interface, g *guard.Guard, podCIDRs []netip.Prefix) *Service {
 	return &Service{client: client, guard: g, podCIDRs: podCIDRs}
 }

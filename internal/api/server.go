@@ -29,6 +29,8 @@ type Server struct {
 	hardening *hardening.Service
 }
 
+// New returns a Server. ready backs /readyz; iso and h serve the isolation and hardening
+// endpoints.
 func New(log *slog.Logger, ready ReadyFunc, iso *isolation.Service, h *hardening.Service) *Server {
 	return &Server{log: log, ready: ready, isolation: iso, hardening: h}
 }

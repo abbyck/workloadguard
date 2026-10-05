@@ -70,6 +70,24 @@ go run ./cmd/workloadguard --context kind-workloadguard
 Run `go run ./cmd/workloadguard -h` for all flags: protected namespaces, pod CIDRs,
 resource defaults, and rollout and shutdown timeouts.
 
+### Troubleshooting a fresh setup
+
+- **`permission denied ... /var/run/docker.sock`:** your user isn't in the `docker` group, or
+  the shell started before it was added. Log out and back in, or run `newgrp docker`.
+- **kind nodes fail with `too many open files`:** a three-node cluster can exceed Linux's
+  default inotify limits. Raise them, as the
+  [kind docs](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)
+  describe: `sudo sysctl fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512`.
+- **The external checks in `verify.sh` fail with `bad address`:** your host's DNS search
+  domain leaks into the pods. The checks already use a trailing-dot name to avoid this;
+  see the comment in [hack/verify.sh](hack/verify.sh).
+- **Port 8080 is taken:** `kubectl -n workloadguard port-forward svc/workloadguard 9090:80`
+  works just as well. `verify.sh` uses its own port, 18090.
+- **Podman instead of Docker:** kind supports it (`KIND_EXPERIMENTAL_PROVIDER=podman`), but
+  the Makefile calls `docker build`; alias it, or build the image by hand.
+- **Slow first run:** the first `make all` pulls the kind node image and the Go builder
+  image. On a machine that already has them, it took about 90 seconds.
+
 ### Installing with Helm (optional)
 
 The plain manifests in [deploy/](deploy/) are the primary path. [charts/workloadguard](charts/workloadguard)
