@@ -18,7 +18,9 @@ func TestIDIsDeterministicAndSymmetric(t *testing.T) {
 	if ab.ID() != ba.ID() {
 		t.Errorf("swapping a and b changed the ID: %s vs %s", ab.ID(), ba.ID())
 	}
-	if ab.ID() != ab.ID() {
+	// Built separately: map iteration order differs between the two, the ID must not.
+	same := Request{A: side("tenant-a", "app", "gateway"), B: side("tenant-b", "app", "dashboard")}
+	if ab.ID() != same.ID() {
 		t.Error("ID is not deterministic")
 	}
 	other := Request{A: side("tenant-a", "app", "gateway"), B: side("tenant-b", "app", "other")}
