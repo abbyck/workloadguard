@@ -3,6 +3,8 @@
 #
 # Isolation targets (fully hardened, so hardening should leave them alone):
 #   tenant-a/gateway, tenant-b/dashboard
+# B's neighbour: tenant-b/reports. Isolating the dashboard by selector must leave it
+# reachable; isolating all of tenant-b (allPods) must cut it off too.
 # Bystander that must keep working while A and B are isolated:
 #   shared/bystander
 # Hardening targets:
@@ -15,6 +17,7 @@ resources:
   - namespaces.yaml
   - tenant-a/gateway.yaml
   - tenant-b/dashboard.yaml
+  - tenant-b/reports.yaml
   - shared/bystander.yaml
   - legacy/unhardened.yaml
   - legacy/partial.yaml

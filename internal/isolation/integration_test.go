@@ -111,3 +111,43 @@ func TestIntegrationIsolationLifecycle(t *testing.T) {
 		t.Errorf("policies left in %s: %d", nsA, len(left.Items))
 	}
 }
+
+func TestIntegrationWholeNamespaces(t *testing.T) {
+	client := integrationClient(t)
+	ctx := context.Background()
+	nsA, nsB := tempNamespace(t, client, "wa"), tempNamespace(t, client, "wb")
+	svc := NewService(client, guard.New(guard.DefaultProtectedNamespaces, ""), []netip.Prefix{netip.MustParsePrefix("10.244.0.0/16")})
+	req := Request{A: Side{Namespace: nsA, AllPods: true}, B: Side{Namespace: nsB, AllPods: true}}
+
+	iso, created, err := svc.On(ctx, req)
+	if err != nil || !created {
+		t.Fatalf("on: created=%v err=%v", created, err)
+	}
+	t.Cleanup(func() { _, _ = svc.Off(context.Background(), iso.ID) })
+
+	np, err := client.NetworkingV1().NetworkPolicies(nsA).Get(ctx, PolicyName(iso.ID, "a"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As stored by the API server: every pod selected, and only three peers (every other
+	// namespace, then the two ipBlocks): no rule admits any pod of the peer's namespace.
+	if sel := np.Spec.PodSelector; len(sel.MatchLabels) != 0 || len(sel.MatchExpressions) != 0 {
+		t.Errorf("podSelector = %+v, want empty", sel)
+	}
+	if peers := np.Spec.Ingress[0].From; len(peers) != 3 || peers[0].NamespaceSelector == nil || peers[1].IPBlock == nil || peers[2].IPBlock == nil {
+		t.Errorf("peers = %+v, want namespaceSelector + 2 ipBlocks", peers)
+	}
+
+	// The isolation reads back as whole namespaces.
+	got, err := svc.Get(ctx, iso.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.A.AllPods || !got.B.AllPods {
+		t.Errorf("get = %+v, want allPods on both sides", got)
+	}
+
+	if deleted, err := svc.Off(ctx, iso.ID); err != nil || len(deleted) != 2 {
+		t.Fatalf("off: %v %v", deleted, err)
+	}
+}

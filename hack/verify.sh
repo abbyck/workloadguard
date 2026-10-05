@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Prove that isolation blocks traffic between the sample workloads, and nothing else.
 #
-#   hack/verify.sh                       full run against the deployed tool:
-#                                        baseline -> isolate -> blocked, others still reachable
-#                                        -> restart gateway pods -> still blocked
-#                                        -> un-isolate -> everything reachable again
-#   hack/verify.sh reachable|blocked     connectivity checks only, A<->B expected as given
+#   hack/verify.sh             full run against the deployed tool:
+#                                1. baseline: everything reachable
+#                                2. isolate gateway <-> dashboard: blocked; everything else,
+#                                   including the dashboard's neighbour in tenant-b, reachable
+#                                3. restart the gateway pods: the new ones are blocked too
+#                                4. un-isolate: everything reachable again
+#                                5. isolate all of tenant-a <-> all of tenant-b (allPods): the
+#                                   neighbour is cut off too; traffic inside tenant-b still works
+#                                6. un-isolate: everything reachable again
+#   hack/verify.sh reachable   connectivity checks only, nothing isolated
+#   hack/verify.sh blocked     ... with gateway <-> dashboard isolated
+#   hack/verify.sh namespaces  ... with tenant-a <-> tenant-b isolated
 #
 # The full run reaches the tool through a port-forward to svc/workloadguard, or at WG_URL
 # if set (e.g. WG_URL=http://localhost:8080 for a locally running binary).
@@ -23,6 +30,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 A=(tenant-a deploy/gateway)
 B=(tenant-b deploy/dashboard)
+NEIGHBOUR=(tenant-b deploy/reports) # in B's namespace, but not B
 BYSTANDER=(shared deploy/bystander)
 
 failures=0
@@ -55,11 +63,15 @@ check() {
   fi
 }
 
-# run_checks PEER_WANT: PEER_WANT is the expectation for A<->B; every other path must be reachable.
+# run_checks PEER_WANT NEIGHBOUR_WANT: expectations for A<->B and for A<->B's neighbour;
+# every other path must be reachable, including traffic inside B's namespace.
 run_checks() {
-  local peer=$1
-  check "$peer"   "A -> B"             http "${A[@]}" http://dashboard.tenant-b
-  check "$peer"   "B -> A"             http "${B[@]}" http://gateway.tenant-a
+  local peer=$1 neighbour=$2
+  check "$peer"      "A -> B"             http "${A[@]}" http://dashboard.tenant-b
+  check "$peer"      "B -> A"             http "${B[@]}" http://gateway.tenant-a
+  check "$neighbour" "A -> B's neighbour" http "${A[@]}" http://reports.tenant-b
+  check "$neighbour" "B's neighbour -> A" http "${NEIGHBOUR[@]}" http://gateway.tenant-a
+  check reachable    "B -> B's neighbour" http "${B[@]}" http://reports.tenant-b
   check reachable "A -> bystander"     http "${A[@]}" http://bystander.shared
   check reachable "B -> bystander"     http "${B[@]}" http://bystander.shared
   check reachable "bystander -> A"     http "${BYSTANDER[@]}" http://gateway.tenant-a
@@ -83,12 +95,12 @@ finish() {
 
 # Connectivity checks only.
 if [[ $# -gt 0 ]]; then
-  if [[ $1 != reachable && $1 != blocked ]]; then
-    echo "usage: $0 [reachable|blocked]" >&2
-    exit 2
-  fi
-  echo "== A<->B expected $1"
-  run_checks "$1"
+  case $1 in
+    reachable)  echo "== nothing isolated";                      run_checks reachable reachable ;;
+    blocked)    echo "== gateway <-> dashboard isolated";        run_checks blocked reachable ;;
+    namespaces) echo "== all of tenant-a <-> all of tenant-b";   run_checks blocked blocked ;;
+    *) echo "usage: $0 [reachable|blocked|namespaces]" >&2; exit 2 ;;
+  esac
   finish
 fi
 
@@ -134,15 +146,27 @@ api() {
   [[ $code == 2* ]] || { echo "API $1 $2 returned $code" >&2; return 1; }
 }
 
+# isolate FILE: turn isolation on from a request file; remember the ID for cleanup.
+isolate() {
+  local resp
+  resp=$(api POST /v1/isolations "$1")
+  iso_id=$(grep -o '"id":"iso-[0-9a-f]*"' <<<"$resp" | cut -d'"' -f4)
+  echo "isolation $iso_id: $(grep -o '"policies":\[[^]]*\]' <<<"$resp")"
+  sleep "$SETTLE"
+}
+
+unisolate() {
+  api DELETE "/v1/isolations/$iso_id" >/dev/null
+  iso_id=""
+  sleep "$SETTLE"
+}
+
 echo "== 1. baseline: everything reachable"
-run_checks reachable
+run_checks reachable reachable
 
 echo "== 2. isolate tenant-a/gateway <-> tenant-b/dashboard"
-resp=$(api POST /v1/isolations "$ROOT/examples/requests/isolate.yaml")
-iso_id=$(grep -o '"id":"iso-[0-9a-f]*"' <<<"$resp" | cut -d'"' -f4)
-echo "isolation $iso_id: $(grep -o '"policies":\[[^]]*\]' <<<"$resp")"
-sleep "$SETTLE"
-run_checks blocked
+isolate "$ROOT/examples/requests/isolate.yaml"
+run_checks blocked reachable
 
 echo "== 3. pod churn: restart the gateway pods, isolation must cover the new ones"
 k -n tenant-a rollout restart deploy/gateway >/dev/null
@@ -152,9 +176,15 @@ check blocked   "B -> new A pods"    http "${B[@]}" http://gateway.tenant-a
 check reachable "new A pods -> DNS"  dns "${A[@]}" kubernetes.default.svc.cluster.local
 
 echo "== 4. un-isolate: previous connectivity restored"
-api DELETE "/v1/isolations/$iso_id" >/dev/null
-iso_id=""
-sleep "$SETTLE"
-run_checks reachable
+unisolate
+run_checks reachable reachable
+
+echo "== 5. isolate all of tenant-a <-> all of tenant-b (allPods)"
+isolate "$ROOT/examples/requests/isolate-namespaces.yaml"
+run_checks blocked blocked
+
+echo "== 6. un-isolate: previous connectivity restored"
+unisolate
+run_checks reachable reachable
 
 finish
