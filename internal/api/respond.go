@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/abbyck/workloadguard/internal/guard"
+	"github.com/abbyck/workloadguard/internal/hardening"
 	"github.com/abbyck/workloadguard/internal/isolation"
 )
 
@@ -46,12 +47,14 @@ func (e *requestError) Error() string { return e.msg }
 // anything else (Kubernetes API failures, misconfiguration) to 500.
 func writeRequestError(w http.ResponseWriter, err error) {
 	var (
-		re  *requestError
-		pe  *guard.ProtectedError
-		inv *isolation.InvalidError
-		nf  *isolation.NamespaceNotFoundError
-		ce  *isolation.ConflictError
-		inf *isolation.NotFoundError
+		re   *requestError
+		pe   *guard.ProtectedError
+		inv  *isolation.InvalidError
+		nf   *isolation.NamespaceNotFoundError
+		ce   *isolation.ConflictError
+		inf  *isolation.NotFoundError
+		hinv *hardening.InvalidError
+		hnf  *hardening.NamespaceNotFoundError
 	)
 	switch {
 	case errors.As(err, &re):
@@ -62,6 +65,10 @@ func writeRequestError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_request", inv.Error())
 	case errors.As(err, &nf):
 		writeError(w, http.StatusBadRequest, "namespace_not_found", nf.Error())
+	case errors.As(err, &hinv):
+		writeError(w, http.StatusBadRequest, "invalid_request", hinv.Error())
+	case errors.As(err, &hnf):
+		writeError(w, http.StatusBadRequest, "namespace_not_found", hnf.Error())
 	case errors.As(err, &inf):
 		writeError(w, http.StatusNotFound, "isolation_not_found", inf.Error())
 	case errors.As(err, &ce):

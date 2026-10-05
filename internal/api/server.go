@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/abbyck/workloadguard/internal/guard"
+	"github.com/abbyck/workloadguard/internal/hardening"
 	"github.com/abbyck/workloadguard/internal/isolation"
 )
 
@@ -22,12 +22,12 @@ const readyTimeout = 2 * time.Second
 type Server struct {
 	log       *slog.Logger
 	ready     ReadyFunc
-	guard     *guard.Guard
 	isolation *isolation.Service
+	hardening *hardening.Service
 }
 
-func New(log *slog.Logger, ready ReadyFunc, g *guard.Guard, iso *isolation.Service) *Server {
-	return &Server{log: log, ready: ready, guard: g, isolation: iso}
+func New(log *slog.Logger, ready ReadyFunc, iso *isolation.Service, h *hardening.Service) *Server {
+	return &Server{log: log, ready: ready, isolation: iso, hardening: h}
 }
 
 // Handler returns the API with all middleware applied.
@@ -39,6 +39,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/isolations", s.listIsolations)
 	mux.HandleFunc("GET /v1/isolations/{id}", s.getIsolation)
 	mux.HandleFunc("DELETE /v1/isolations/{id}", s.deleteIsolation)
+	mux.HandleFunc("POST /v1/hardening/plan", s.planHardening)
+	mux.HandleFunc("POST /v1/hardening/apply", s.applyHardening)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no route for "+r.Method+" "+r.URL.Path)
 	})

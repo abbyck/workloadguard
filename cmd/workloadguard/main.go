@@ -14,10 +14,12 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/abbyck/workloadguard/internal/api"
 	"github.com/abbyck/workloadguard/internal/guard"
+	"github.com/abbyck/workloadguard/internal/hardening"
 	"github.com/abbyck/workloadguard/internal/isolation"
 	"github.com/abbyck/workloadguard/internal/kube"
 )
@@ -29,6 +31,10 @@ type config struct {
 	logLevel        slog.Level
 	protected       string
 	podCIDRs        string
+	cpuRequest      string
+	memoryRequest   string
+	memoryLimit     string
+	rolloutTimeout  time.Duration
 }
 
 func main() {
@@ -41,6 +47,10 @@ func main() {
 		"comma-separated namespaces the tool never touches; its own namespace is always added")
 	flag.StringVar(&cfg.podCIDRs, "pod-cidrs", "10.244.0.0/16",
 		"comma-separated CIDRs covering all pod IPs (kind's default is 10.244.0.0/16); isolation excludes them from its ipBlock rule")
+	flag.StringVar(&cfg.cpuRequest, "default-cpu-request", "50m", "CPU request set on containers that have none")
+	flag.StringVar(&cfg.memoryRequest, "default-memory-request", "64Mi", "memory request set on containers that have none")
+	flag.StringVar(&cfg.memoryLimit, "default-memory-limit", "256Mi", "memory limit set on containers that have none (no CPU limit is ever set)")
+	flag.DurationVar(&cfg.rolloutTimeout, "rollout-timeout", 90*time.Second, "how long hardening apply waits for patched workloads to roll out; 0 skips the wait")
 	flag.TextVar(&cfg.logLevel, "log-level", slog.LevelInfo, "log level: debug, info, warn or error")
 	flag.Parse()
 
@@ -64,17 +74,24 @@ func run(cfg config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defaults, err := parseDefaults(cfg)
+	if err != nil {
+		return err
+	}
 	g := guard.New(splitList(cfg.protected), ownNamespace())
 	log.Info("protected namespaces", "namespaces", g.Protected())
 
 	srv := &http.Server{
-		Addr:    cfg.listen,
-		Handler: api.New(log, apiReachable(client), g, isolation.NewService(client, g, podCIDRs)).Handler(),
-		// Bounded so slow or stuck clients can't hold connections forever. WriteTimeout is
-		// generous because hardening apply waits for rollouts before it responds.
+		Addr: cfg.listen,
+		Handler: api.New(log, apiReachable(client),
+			isolation.NewService(client, g, podCIDRs),
+			hardening.NewService(client, g, defaults, cfg.rolloutTimeout),
+		).Handler(),
+		// Bounded so slow or stuck clients can't hold connections forever. WriteTimeout
+		// leaves room for hardening apply, which waits for rollouts before it responds.
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      3 * time.Minute,
+		WriteTimeout:      cfg.rolloutTimeout + 90*time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
 
@@ -133,4 +150,26 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+func parseDefaults(cfg config) (hardening.Defaults, error) {
+	var d hardening.Defaults
+	for _, q := range []struct {
+		flag, value string
+		into        *resource.Quantity
+	}{
+		{"default-cpu-request", cfg.cpuRequest, &d.CPURequest},
+		{"default-memory-request", cfg.memoryRequest, &d.MemoryRequest},
+		{"default-memory-limit", cfg.memoryLimit, &d.MemoryLimit},
+	} {
+		v, err := resource.ParseQuantity(q.value)
+		if err != nil {
+			return d, fmt.Errorf("--%s %q: %w", q.flag, q.value, err)
+		}
+		*q.into = v
+	}
+	if d.MemoryRequest.Cmp(d.MemoryLimit) > 0 {
+		return d, fmt.Errorf("--default-memory-request %s is above --default-memory-limit %s", &d.MemoryRequest, &d.MemoryLimit)
+	}
+	return d, nil
 }
