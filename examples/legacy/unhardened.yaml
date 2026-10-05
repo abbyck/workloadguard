@@ -1,7 +1,7 @@
-# No resources and no securityContext at all. Baseline hardening should fill everything in
-# and the app should keep running. The image already runs as a non-root user (uid 101) on
-# port 8080, so dropping all capabilities doesn't break it. Strict hardening
-# (readOnlyRootFilesystem) WOULD break it, because nginx writes to /tmp.
+# No resources and no securityContext at all. Baseline hardening (no privilege escalation,
+# RuntimeDefault seccomp) should fill in its fields and the app should keep running.
+# Under strict, dropping all capabilities and runAsNonRoot are fine (the image runs as
+# uid 101 on port 8080), but readOnlyRootFilesystem breaks it, because nginx writes to /tmp.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
