@@ -73,7 +73,8 @@ func policyFor(id, side string, self, peer Side, podCIDRs []netip.Prefix, req st
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: maps.Clone(self.Selector)},
 			// Selecting the pods for both types makes them deny-by-default in both directions;
-			// the rules below then allow everything except the peer.
+			// the rules below then allow everything except the peer. For an AllPods side the
+			// selector is empty, which selects every pod in the namespace.
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
 			Ingress:     []networkingv1.NetworkPolicyIngressRule{{From: peers}},
 			Egress:      []networkingv1.NetworkPolicyEgressRule{{To: peers}},
@@ -98,6 +99,9 @@ func PolicyName(id, side string) string {
 //  3. everything that isn't a pod: external addresses, nodes (kubelet probes) and
 //     host-network pods. Most CNIs match ipBlock against pod IPs too, so without excepting
 //     the pod CIDRs this rule would let B straight back in.
+//
+// If the peer is a whole namespace (AllPods), it has no labels to negate, so there's no
+// rule 2: no pod in that namespace is allowed.
 func allExcept(peer Side, podCIDRs []netip.Prefix) []networkingv1.NetworkPolicyPeer {
 	peers := []networkingv1.NetworkPolicyPeer{{
 		NamespaceSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{

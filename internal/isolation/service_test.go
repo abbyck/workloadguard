@@ -219,6 +219,31 @@ func TestOnRefusesExistingPolicies(t *testing.T) {
 	}
 }
 
+func TestWholeNamespaceConflictsWithEveryPolicyInIt(t *testing.T) {
+	// A policy for app=db in tenant-b doesn't touch the dashboard, so it doesn't block
+	// isolating the dashboard. It does block isolating all of tenant-b: the isolation would
+	// also select the db pods, now or once they start, and the two policies would combine.
+	dbPolicy := policy("tenant-b", "db-only", matchLabels("app", "db"), nil)
+
+	client := newCluster()
+	if err := client.Tracker().Add(dbPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := newService(client).On(context.Background(), brief); err != nil {
+		t.Fatalf("selector isolation: %v", err)
+	}
+
+	client = newCluster()
+	if err := client.Tracker().Add(dbPolicy); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := newService(client).On(context.Background(), Request{A: brief.A, B: Side{Namespace: "tenant-b", AllPods: true}})
+	var ce *ConflictError
+	if !errors.As(err, &ce) || ce.Policies[0].Name != "db-only" {
+		t.Fatalf("whole-namespace isolation: want ConflictError naming db-only, got %v", err)
+	}
+}
+
 func TestConflictCatchesPolicyBeforePodsExist(t *testing.T) {
 	// No dashboard pod is running, but the policy would select one as soon as it starts.
 	client := fake.NewClientset(

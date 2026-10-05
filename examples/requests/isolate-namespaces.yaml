@@ -1,0 +1,11 @@
+# Cut off two whole namespaces from each other, for example to contain a compromised tenant.
+# allPods has to be set explicitly; an empty selector is rejected.
+#   curl -sS -X POST localhost:8080/v1/isolations \
+#     -H 'Content-Type: application/yaml' --data-binary @examples/requests/isolate-namespaces.yaml
+isolate:
+  a:
+    namespace: tenant-a
+    allPods: true
+  b:
+    namespace: tenant-b
+    allPods: true

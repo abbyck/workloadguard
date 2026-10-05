@@ -138,6 +138,15 @@ func TestIsolationErrorsOverHTTP(t *testing.T) {
 			}
 		})
 	}
+	// Whole namespaces: accepted when asked for explicitly; a misspelt field is rejected
+	// instead of leaving an empty selector behind.
+	wholeNS := "isolate:\n  a: {namespace: tenant-a, allPods: true}\n  b: {namespace: tenant-b, allPods: true}\n"
+	if code, body := do(t, newFlowServer(), "POST", "/v1/isolations", wholeNS); code != 201 {
+		t.Errorf("whole namespaces: %d %v, want 201", code, body)
+	}
+	if code, body := do(t, newFlowServer(), "POST", "/v1/isolations", strings.Replace(wholeNS, "allPods", "allpods", 1)); code != 400 || errorCode(body) != "bad_body" {
+		t.Errorf("misspelt allPods: %d %v, want 400 bad_body", code, body)
+	}
 	if code, body := do(t, newFlowServer(), "DELETE", "/v1/isolations/x,app=gateway", ""); code != 400 || errorCode(body) != "invalid_request" {
 		t.Errorf("malformed ID: %d %v", code, body)
 	}

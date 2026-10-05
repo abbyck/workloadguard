@@ -45,7 +45,9 @@ func (e *ConflictError) Error() string {
 // isolations would silently undo both.
 //
 // A policy counts as selecting a side if it matches any pod the side selects right now, or
-// a pod carrying exactly the side's labels, so it's caught even while no such pod runs.
+// a pod carrying exactly the side's labels, so it's caught even while no such pod runs. For
+// a whole-namespace side, every policy in the namespace counts: each selects some of "every
+// pod", now or once a matching pod starts.
 func conflicts(ctx context.Context, client kubernetes.Interface, r Request) ([]ConflictingPolicy, error) {
 	id := r.ID()
 	var found []ConflictingPolicy
@@ -55,15 +57,18 @@ func conflicts(ctx context.Context, client kubernetes.Interface, r Request) ([]C
 		if err != nil {
 			return nil, fmt.Errorf("list NetworkPolicies in %s: %w", s.Namespace, err)
 		}
-		pods, err := client.CoreV1().Pods(s.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labels.SelectorFromSet(s.Selector).String(),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list pods in %s: %w", s.Namespace, err)
-		}
-		podLabels := []labels.Set{labels.Set(s.Selector)}
-		for _, p := range pods.Items {
-			podLabels = append(podLabels, labels.Set(p.Labels))
+		var podLabels []labels.Set
+		if !s.AllPods {
+			pods, err := client.CoreV1().Pods(s.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: labels.SelectorFromSet(s.Selector).String(),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("list pods in %s: %w", s.Namespace, err)
+			}
+			podLabels = append(podLabels, labels.Set(s.Selector))
+			for _, p := range pods.Items {
+				podLabels = append(podLabels, labels.Set(p.Labels))
+			}
 		}
 
 		for i := range policies.Items {
@@ -72,9 +77,12 @@ func conflicts(ctx context.Context, client kubernetes.Interface, r Request) ([]C
 			if np.Labels[IDLabel] == id || seen[ref] {
 				continue
 			}
-			hit, err := selectsAny(np, podLabels)
-			if err != nil {
-				return nil, err
+			hit := s.AllPods
+			if !hit {
+				var err error
+				if hit, err = selectsAny(np, podLabels); err != nil {
+					return nil, err
+				}
 			}
 			if hit {
 				seen[ref] = true

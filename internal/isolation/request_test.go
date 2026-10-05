@@ -80,6 +80,32 @@ func TestValidate(t *testing.T) {
 			req:  Request{A: side("tenant-a", "app", "gateway"), B: side("tenant-a", "app", "other")},
 		},
 		{
+			name: "whole namespaces, asked for explicitly",
+			req:  Request{A: Side{Namespace: "tenant-a", AllPods: true}, B: Side{Namespace: "tenant-b", AllPods: true}},
+		},
+		{
+			name: "whole namespace against a selector",
+			req:  Request{A: Side{Namespace: "tenant-a", AllPods: true}, B: side("tenant-b", "app", "dashboard")},
+		},
+		{
+			// Ambiguous: does the operator mean the selector or the whole namespace?
+			name:    "allPods and a selector together",
+			req:     Request{A: Side{Namespace: "tenant-a", AllPods: true, Selector: map[string]string{"app": "gateway"}}, B: side("tenant-b", "app", "dashboard")},
+			wantErr: "a: set either selector or allPods, not both",
+		},
+		{
+			// An empty selector still isn't read as "every pod"; the error says how to ask.
+			name:    "empty selector points at allPods",
+			req:     Request{A: side("tenant-a", "app", "gateway"), B: side("tenant-b")},
+			wantErr: "set allPods: true instead",
+		},
+		{
+			// A whole namespace overlaps anything else in it, including itself.
+			name:    "whole namespace against a selector in the same namespace",
+			req:     Request{A: Side{Namespace: "tenant-a", AllPods: true}, B: side("tenant-a", "app", "gateway")},
+			wantErr: "can match the same pods",
+		},
+		{
 			name: "same selector in different namespaces is fine",
 			req:  Request{A: side("tenant-a", "app", "web"), B: side("tenant-b", "app", "web")},
 		},
@@ -205,6 +231,20 @@ func TestCheck(t *testing.T) {
 					t.Errorf("want UnsupportedError about hostNetwork, got %v", err)
 				}
 			},
+		},
+		{
+			// Isolating a whole namespace touches every pod in it, opted-out ones included.
+			name: "whole namespace with an opted-out pod is refused",
+			objects: append(baseCluster,
+				pod("tenant-b", "db-1", map[string]string{"app": "db", guard.IgnoreLabel: "true"})),
+			req:   Request{A: brief.A, B: Side{Namespace: "tenant-b", AllPods: true}},
+			check: wantProtected,
+		},
+		{
+			name:         "empty namespace is a warning, not an error",
+			objects:      []runtime.Object{ns("tenant-a", nil), ns("tenant-b", nil), pod("tenant-a", "gateway-1", map[string]string{"app": "gateway"})},
+			req:          Request{A: brief.A, B: Side{Namespace: "tenant-b", AllPods: true}},
+			wantWarnings: 1,
 		},
 		{
 			name:         "selector matching no pods is a warning, not an error",

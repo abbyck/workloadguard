@@ -29,6 +29,16 @@ func TestIDIsDeterministicAndSymmetric(t *testing.T) {
 	}
 }
 
+// Isolations are found again by an ID hashed from the request's JSON. A change to that
+// encoding (adding AllPods, say) must not change the ID of an existing request, or
+// isolations already in a cluster could no longer be listed, re-applied or turned off.
+func TestIDOfExistingRequestsIsStable(t *testing.T) {
+	r := Request{A: side("tenant-a", "app", "gateway"), B: side("tenant-b", "app", "dashboard")}
+	if got := r.ID(); got != "iso-13893ed2ba" {
+		t.Errorf("ID of the brief's example = %s, want iso-13893ed2ba (as created before allPods existed)", got)
+	}
+}
+
 func TestBuildMetadata(t *testing.T) {
 	r := Request{A: side("tenant-a", "app", "gateway"), B: side("tenant-b", "app", "dashboard")}
 	policies := Build(r, kindPodCIDRs)
@@ -155,6 +165,51 @@ func TestPeersAllowEverythingExceptB(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPeersAllowEverythingExceptWholeNamespace(t *testing.T) {
+	r := Request{A: side("tenant-a", "app", "gateway"), B: Side{Namespace: "tenant-b", AllPods: true}}
+	policies := Build(r, kindPodCIDRs)
+	var gatewayPeers []networkingv1.NetworkPolicyPeer
+	for _, p := range policies {
+		if p.Namespace == "tenant-a" {
+			gatewayPeers = p.Spec.Ingress[0].From
+		}
+	}
+
+	tests := []struct {
+		name string
+		pod  fakePod
+		want bool
+	}{
+		{"dashboard in tenant-b", fakePod{"tenant-b", map[string]string{"app": "dashboard"}}, false},
+		{"any other pod in tenant-b", fakePod{"tenant-b", map[string]string{"app": "reports"}}, false},
+		{"unlabeled pod in tenant-b", fakePod{"tenant-b", nil}, false},
+		{"pod in another namespace", fakePod{"shared", map[string]string{"app": "bystander"}}, true},
+		{"DNS", fakePod{"kube-system", map[string]string{"k8s-app": "kube-dns"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := allowed(t, gatewayPeers, tt.pod); got != tt.want {
+				t.Errorf("allowed = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWholeNamespacePolicySelectsEveryPod(t *testing.T) {
+	r := Request{A: Side{Namespace: "tenant-a", AllPods: true}, B: side("tenant-b", "app", "dashboard")}
+	for _, p := range Build(r, kindPodCIDRs) {
+		if p.Namespace != "tenant-a" {
+			continue
+		}
+		sel := p.Spec.PodSelector
+		if len(sel.MatchLabels) != 0 || len(sel.MatchExpressions) != 0 {
+			t.Errorf("podSelector = %+v, want empty (every pod in the namespace)", sel)
+		}
+		return
+	}
+	t.Fatal("no policy for tenant-a")
 }
 
 func TestPeersSameNamespace(t *testing.T) {

@@ -17,13 +17,24 @@ import (
 	"github.com/abbyck/workloadguard/internal/guard"
 )
 
-// Side is one of the two workloads: the pods in Namespace matching every label in Selector.
+// Side is one of the two workloads: the pods in Namespace matching every label in Selector,
+// or, with AllPods, every pod in Namespace.
+//
+// Both fields are omitted from JSON when empty, so adding AllPods didn't change the IDs of
+// selector-based isolations, which are hashes of this encoding.
 type Side struct {
 	Namespace string            `json:"namespace"`
-	Selector  map[string]string `json:"selector"`
+	Selector  map[string]string `json:"selector,omitempty"`
+	// AllPods isolates the whole namespace, for example to cut off a compromised tenant. It
+	// has to be asked for explicitly: an empty or forgotten selector is rejected instead of
+	// being read as "every pod".
+	AllPods bool `json:"allPods,omitempty"`
 }
 
 func (s Side) String() string {
+	if s.AllPods {
+		return s.Namespace + "/*"
+	}
 	return s.Namespace + "/" + labels.SelectorFromSet(s.Selector).String()
 }
 
@@ -88,10 +99,14 @@ func (s Side) validate(name string) []string {
 			problems = append(problems, fmt.Sprintf("%s.namespace %q: %s", name, s.Namespace, msg))
 		}
 	}
-	// An empty selector matches every pod in the namespace. That is almost certainly a
-	// mistake, and isolating a whole namespace deserves a more deliberate request.
-	if len(s.Selector) == 0 {
-		problems = append(problems, name+".selector must have at least one label")
+	// An empty selector matches every pod in the namespace. That's usually a mistake, so a
+	// whole namespace has to be asked for with allPods.
+	switch {
+	case s.AllPods && len(s.Selector) > 0:
+		problems = append(problems, name+": set either selector or allPods, not both")
+	case !s.AllPods && len(s.Selector) == 0:
+		problems = append(problems, name+".selector must have at least one label "+
+			"(to isolate every pod in the namespace, set allPods: true instead)")
 	}
 	for _, k := range slices.Sorted(maps.Keys(s.Selector)) {
 		for _, msg := range validation.IsQualifiedName(k) {
@@ -169,6 +184,9 @@ func checkSide(ctx context.Context, client kubernetes.Interface, g *guard.Guard,
 	}
 	if len(pods.Items) == 0 {
 		// Allowed: the policy still applies to pods created later. But it's likely a typo.
+		if s.AllPods {
+			return []string{fmt.Sprintf("%s: namespace %s has no pods right now", name, s.Namespace)}, nil
+		}
 		return []string{fmt.Sprintf("%s selector %s matches no pods right now", name, s)}, nil
 	}
 	return nil, nil
