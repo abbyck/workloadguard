@@ -25,6 +25,9 @@ import (
 	"github.com/abbyck/workloadguard/internal/metrics"
 )
 
+// version is set at build time: go build -ldflags "-X main.version=0.1.0".
+var version = "dev"
+
 type config struct {
 	kube            kube.Options
 	listen          string
@@ -53,8 +56,13 @@ func main() {
 	flag.StringVar(&cfg.memoryLimit, "default-memory-limit", "256Mi", "memory limit set on containers that have none (no CPU limit is ever set)")
 	flag.DurationVar(&cfg.rolloutTimeout, "rollout-timeout", 90*time.Second, "how long hardening apply waits for patched workloads to roll out; 0 skips the wait")
 	flag.TextVar(&cfg.logLevel, "log-level", slog.LevelInfo, "log level: debug, info, warn or error")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.logLevel}))
 	if err := run(cfg, log); err != nil {
 		log.Error("exiting", "err", err)
@@ -66,6 +74,8 @@ func run(cfg config, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	log.Info("starting", "version", version)
+	metrics.RegisterBuildInfo(version)
 	metrics.RegisterClientGo()
 	client, err := kube.NewClient(cfg.kube)
 	if err != nil {
@@ -114,6 +124,9 @@ func run(cfg config, log *slog.Logger) error {
 		return fmt.Errorf("http server: %w", err)
 	case <-ctx.Done():
 	}
+	// Restore default signal handling, so a second Ctrl-C or SIGTERM ends the process at once
+	// instead of waiting out the graceful shutdown.
+	stop()
 
 	// Stop accepting new connections and let in-flight requests finish, so a rollout or
 	// eviction doesn't cut off an isolation or hardening request halfway.

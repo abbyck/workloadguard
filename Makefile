@@ -5,7 +5,7 @@ VERSION  ?= 0.1.0
 IMAGE    := workloadguard:$(VERSION)
 KUBECTL  := kubectl --context $(CONTEXT)
 
-.PHONY: all cluster samples image load deploy port-forward verify test integration vet clean
+.PHONY: all cluster samples image load deploy port-forward verify test integration vet clean help
 
 ## all: cluster, sample workloads, build and deploy the tool, then verify
 all: cluster samples deploy verify
@@ -23,7 +23,7 @@ samples:
 
 ## image: build the container image
 image:
-	docker build -t $(IMAGE) .
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
 
 ## load: copy the image into the kind nodes (no registry needed)
 load: image

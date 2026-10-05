@@ -57,6 +57,9 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap lets http.ResponseController reach the underlying writer (flushing, deadlines).
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // logRequests puts a request-scoped logger in the context and writes one access log line
 // per request. Probe requests are logged at debug level so they don't drown everything else.
 func (s *Server) logRequests(next http.Handler) http.Handler {

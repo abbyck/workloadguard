@@ -1,15 +1,17 @@
 # Build a static binary, then copy it into a distroless image with no shell or package
-# manager, running as a non-root user.
-FROM golang:1.27 AS build
+# manager, running as a non-root user. Base images are pinned by digest (tag kept for
+# readability), so a rebuild uses exactly the same bases until they're bumped on purpose.
+FROM golang:1.27@sha256:e0174e51e81218523251d85d248a90d24c3d5e81543b4f07a5d66229397db190 AS build
 WORKDIR /src
 # Dependencies first, so code changes don't invalidate the module download layer.
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /workloadguard ./cmd/workloadguard
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /workloadguard ./cmd/workloadguard
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /workloadguard /workloadguard
 USER 65532:65532
 ENTRYPOINT ["/workloadguard"]

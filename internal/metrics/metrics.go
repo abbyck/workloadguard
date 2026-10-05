@@ -4,6 +4,7 @@ package metrics
 import (
 	"context"
 	"net/url"
+	"runtime"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -51,6 +52,17 @@ func init() {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		HTTPRequests, HTTPDuration, HardeningWorkloads, KubeRequests, KubeDuration,
 	)
+}
+
+// RegisterBuildInfo adds workloadguard_build_info, always 1, with the version as a label, so
+// dashboards and alerts can tell which build is running.
+func RegisterBuildInfo(version string) {
+	info := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "workloadguard_build_info",
+		Help: "Build information; the value is always 1.",
+	}, []string{"version", "goversion"})
+	info.WithLabelValues(version, runtime.Version()).Set(1)
+	Registry.MustRegister(info)
 }
 
 // RegisterClientGo routes client-go's request metrics into KubeRequests and KubeDuration.
