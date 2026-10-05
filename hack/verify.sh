@@ -38,9 +38,15 @@ http() { probe "$1" "$2" wget -q -O /dev/null -T "$TIMEOUT" "$3"; }
 dns() { probe "$1" "$2" timeout "$TIMEOUT" nslookup "$3"; }
 
 # check WANT DESC CMD...: run CMD, compare reachable/blocked against WANT, print a row.
+# Retries a few times: Service endpoints and policy changes take a moment to be programmed
+# after the API reports them. A real failure persists, so it still fails after the last try.
 check() {
   local want=$1 desc=$2 got; shift 2
-  if "$@"; then got=reachable; else got=blocked; fi
+  for _ in 1 2 3; do
+    if "$@"; then got=reachable; else got=blocked; fi
+    [[ $got == "$want" ]] && break
+    sleep 2
+  done
   if [[ $got == "$want" ]]; then
     printf 'PASS  %-32s %s\n' "$desc" "$got"
   else

@@ -17,9 +17,16 @@ reachable() {
   k exec client -- curl -s -o /dev/null --max-time 3 http://server:8080/ 2>/dev/null
 }
 
+# expect WANT DESC: retry for a while, because Service endpoints and policy changes take a
+# moment to be programmed after the API reports them. A real failure persists, so it still
+# fails after the last attempt.
 expect() {
-  local want=$1 desc=$2
-  if reachable; then got=reachable; else got=blocked; fi
+  local want=$1 desc=$2 got
+  for _ in 1 2 3 4 5; do
+    if reachable; then got=reachable; else got=blocked; fi
+    [[ $got == "$want" ]] && break
+    sleep 2
+  done
   if [[ $got == "$want" ]]; then
     echo "PASS  $desc ($got)"
   else
@@ -28,10 +35,15 @@ expect() {
   fi
 }
 
+# A previous run's namespace may still be terminating; creating it again would fail.
+kubectl --context "$CTX" wait --for=delete "namespace/$NS" --timeout=90s >/dev/null 2>&1 || true
 kubectl --context "$CTX" create namespace "$NS" >/dev/null
-k run server --image=nginxinc/nginx-unprivileged:1.27-alpine --labels=app=server --port=8080 >/dev/null
+# Zero grace period: these throwaway pods (sleep ignores SIGTERM) would otherwise keep the
+# namespace terminating for 30s after the script ends.
+fast='{"spec":{"terminationGracePeriodSeconds":0}}'
+k run server --image=nginxinc/nginx-unprivileged:1.27-alpine --labels=app=server --port=8080 --overrides="$fast" >/dev/null
 k expose pod server --port=8080 >/dev/null
-k run client --image=curlimages/curl:8.11.1 --labels=app=client --command -- sleep infinity >/dev/null
+k run client --image=curlimages/curl:8.11.1 --labels=app=client --overrides="$fast" --command -- sleep infinity >/dev/null
 k wait --for=condition=Ready pod/server pod/client --timeout=120s >/dev/null
 
 expect reachable "baseline: client -> server"
@@ -47,11 +59,9 @@ spec:
       app: server
   policyTypes: [Ingress]
 YAML
-sleep 3  # give the CNI a moment to program the rule
 expect blocked "deny-all ingress applied"
 
 k delete networkpolicy deny-all-ingress >/dev/null
-sleep 3
 expect reachable "policy removed"
 
 echo "NetworkPolicy is enforced."
