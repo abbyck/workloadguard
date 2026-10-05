@@ -42,6 +42,14 @@ func (e *InvalidError) Error() string {
 	return "invalid isolation request: " + strings.Join(e.Problems, "; ")
 }
 
+// UnsupportedError means the request is valid but its targets can't be isolated with
+// NetworkPolicy, so doing it would only look like isolation.
+type UnsupportedError struct {
+	Reason string
+}
+
+func (e *UnsupportedError) Error() string { return "can't isolate this target: " + e.Reason }
+
 // NamespaceNotFoundError means a side names a namespace that doesn't exist.
 type NamespaceNotFoundError struct {
 	Namespace string
@@ -108,9 +116,9 @@ func canOverlap(a, b map[string]string) bool {
 }
 
 // Check validates the request against the cluster: both namespaces exist and aren't
-// protected, and no currently matching pod has opted out. It returns warnings for things
-// that are allowed but suspicious. Errors are *InvalidError, *NamespaceNotFoundError,
-// *guard.ProtectedError, or an API error.
+// protected, and no currently matching pod has opted out or runs on the host network. It
+// returns warnings for things that are allowed but suspicious. Errors are *InvalidError,
+// *NamespaceNotFoundError, *guard.ProtectedError, *UnsupportedError, or an API error.
 func Check(ctx context.Context, client kubernetes.Interface, g *guard.Guard, r Request) ([]string, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -148,8 +156,15 @@ func checkSide(ctx context.Context, client kubernetes.Interface, g *guard.Guard,
 		return nil, fmt.Errorf("list pods for %s: %w", name, err)
 	}
 	for i := range pods.Items {
-		if err := g.CheckWorkload("Pod", &pods.Items[i]); err != nil {
+		p := &pods.Items[i]
+		if err := g.CheckWorkload("Pod", p); err != nil {
 			return nil, err
+		}
+		if p.Spec.HostNetwork {
+			// NetworkPolicy doesn't apply to host-network pods, and their traffic carries the
+			// node's IP, which the ipBlock rule allows. Isolation would silently do nothing.
+			return nil, &UnsupportedError{Reason: fmt.Sprintf(
+				"pod %s/%s (%s) uses hostNetwork; NetworkPolicy doesn't apply to it", p.Namespace, p.Name, name)}
 		}
 	}
 	if len(pods.Items) == 0 {

@@ -53,6 +53,7 @@ func writeRequestError(w http.ResponseWriter, err error) {
 		nf   *isolation.NamespaceNotFoundError
 		ce   *isolation.ConflictError
 		inf  *isolation.NotFoundError
+		un   *isolation.UnsupportedError
 		hinv *hardening.InvalidError
 		hnf  *hardening.NamespaceNotFoundError
 	)
@@ -71,6 +72,8 @@ func writeRequestError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "namespace_not_found", hnf.Error())
 	case errors.As(err, &inf):
 		writeError(w, http.StatusNotFound, "isolation_not_found", inf.Error())
+	case errors.As(err, &un):
+		writeError(w, http.StatusUnprocessableEntity, "unsupported_target", un.Error())
 	case errors.As(err, &ce):
 		writeError(w, http.StatusConflict, "existing_policies", ce.Error())
 	default:

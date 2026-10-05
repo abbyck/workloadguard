@@ -186,6 +186,27 @@ func TestCheck(t *testing.T) {
 			req: brief,
 		},
 		{
+			// NetworkPolicy doesn't apply to host-network pods; isolating one would silently
+			// do nothing, so it's refused instead of reported as done.
+			name: "host-network pod on a side is refused",
+			objects: []runtime.Object{
+				ns("tenant-a", nil), ns("tenant-b", nil),
+				pod("tenant-a", "gateway-1", map[string]string{"app": "gateway"}),
+				func() runtime.Object {
+					p := pod("tenant-b", "dashboard-1", map[string]string{"app": "dashboard"})
+					p.Spec.HostNetwork = true
+					return p
+				}(),
+			},
+			req: brief,
+			check: func(t *testing.T, err error) {
+				var un *UnsupportedError
+				if !errors.As(err, &un) || !strings.Contains(un.Reason, "hostNetwork") {
+					t.Errorf("want UnsupportedError about hostNetwork, got %v", err)
+				}
+			},
+		},
+		{
 			name:         "selector matching no pods is a warning, not an error",
 			objects:      []runtime.Object{ns("tenant-a", nil), ns("tenant-b", nil), pod("tenant-a", "gateway-1", map[string]string{"app": "gateway"})},
 			req:          brief,
