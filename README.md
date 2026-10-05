@@ -450,3 +450,81 @@ belongs in the source manifests.
 
   Testing in the cluster caught one gap: server-side apply of a new NetworkPolicy also
   needs `create`, not just `patch`.
+
+## Tests
+
+```sh
+make test     # unit tests, with the race detector
+make vet      # gofmt, go vet, staticcheck (what CI runs)
+make verify   # end-to-end isolation proof against the deployed tool
+```
+
+### Unit tests
+
+The unit tests use the client-go fake clientset. Most of the logic is pure functions, so
+many tests don't need a client at all:
+
+- building policies, negating selectors, validation and the overlap check
+- the pod-spec hardening rules
+- rollout status and the guard rules
+
+The fake clientset covers the parts that read and write the cluster: on/off, conflicts,
+plan/apply, conflict retries and rollback. The HTTP layer is tested end to end against a
+fake cluster, which pins down every status code the API section documents.
+
+**What the unit tests don't prove.** The fake clientset doesn't enforce NetworkPolicies, run
+admission, honor `DryRun`, or check `resourceVersion` on patches. So:
+
+- Traffic blocking is proved by `hack/verify.sh` on a real cluster.
+- The tests intercept dry-run patches themselves.
+- The `resourceVersion` conflict was checked against kind by hand.
+
+### The tricky cases, and why I chose them
+
+Each of these has a comment in the test explaining it.
+
+1. **Negating a multi-label selector** (`TestPeersAllowEverythingExceptB`, in
+   `internal/isolation/policy_test.go`). "Everything except B" for B =
+   `{app: dashboard, tier: frontend}` needs one rule per label, because conditions inside a
+   single rule are ANDed. Combining them into one rule looks right and passes a casual
+   review. But it cuts off pods that share just one label with B, like
+   `{app: dashboard, tier: backend}`.
+
+   The test evaluates the generated rules with real label-selector matching against nine
+   pods, instead of comparing structs. I checked that it catches the bug by introducing the
+   bug on purpose: three cases fail.
+2. **The `ipBlock` must exclude pod CIDRs** (`TestIPBlockExceptsPodCIDRs`). The obvious
+   "allow `0.0.0.0/0` for external traffic" silently lets the isolated peer back in, because
+   kindnet matches `ipBlock` against pod IPs. This one was found and proved on kind:
+   removing the exclusion reopened A↔B. The unit test keeps it from regressing.
+3. **Turning off deletes only what it created** (`TestOffRemovesOnlyItsOwnPolicies`). The
+   brief stresses restoring previous connectivity. A broader delete, such as every
+   workloadguard policy in the namespace or every policy selecting the pods, would remove
+   another team's policy or another isolation, and so change connectivity the request
+   didn't own.
+4. **Existing policies, including other isolations, block the request**
+   (`TestOnRefusesExistingPolicies`). Because NetworkPolicies combine with OR, "add a policy"
+   can *widen* access. Two isolations on the same pods cancel each other out. This is easy to
+   miss, because each isolation looks correct on its own.
+5. **Hardening keeps explicit values** (`TestExplicitValuesArePreserved`, and
+   `TestApplyKeepsExplicitValuesThroughThePatch` for the real patch path). A
+   partially-configured container keeps every value it has: requests, an explicit
+   `allowPrivilegeEscalation: true`, `runAsUser`, added capabilities. Only the gaps are
+   filled. The memory limit is raised to the request when the default would be lower, and
+   `runAsNonRoot` is skipped when something explicitly runs as root. Getting this wrong
+   breaks the workload, which the brief names as the thing to avoid.
+
+### End-to-end: `hack/verify.sh`
+
+It runs against the deployed tool, through its own port-forward:
+
+1. Baseline: every path is reachable.
+2. Isolate through the API. A↔B is blocked, while bystander↔A, bystander↔B, DNS and
+   external egress still work.
+3. Restart the gateway pods. The new pods are blocked too.
+4. Un-isolate. Every path is reachable again.
+
+It prints a PASS/FAIL table and exits non-zero on any mismatch. If it's interrupted while
+isolated, it turns isolation off before exiting, falling back to `kubectl` if Ctrl-C also
+killed the port-forward. `hack/verify.sh reachable|blocked` runs the connectivity checks
+alone.

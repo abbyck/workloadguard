@@ -40,18 +40,19 @@ deploy: load
 port-forward:
 	$(KUBECTL) -n workloadguard port-forward svc/workloadguard 8080:80
 
-## verify: check connectivity between the sample workloads
+## verify: prove isolation end to end against the deployed tool
 verify:
 	./hack/verify.sh
 
 ## test: run the unit tests
 test:
-	go test ./...
+	go test -race ./...
 
-## vet: static checks
+## vet: static checks (same as CI)
 vet:
-	go vet ./...
 	test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+	go vet ./...
+	go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
 
 ## clean: delete the kind cluster
 clean:
