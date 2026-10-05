@@ -1,0 +1,6 @@
+# Plan or apply baseline hardening for the legacy namespace.
+#   curl -sS -X POST localhost:8080/v1/hardening/plan \
+#     -H 'Content-Type: application/yaml' --data-binary @examples/requests/harden-baseline.yaml
+namespaces:
+  - legacy
+level: baseline

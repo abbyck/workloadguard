@@ -1,0 +1,12 @@
+# Block all traffic between tenant-a/gateway and tenant-b/dashboard.
+#   curl -sS -X POST localhost:8080/v1/isolations \
+#     -H 'Content-Type: application/yaml' --data-binary @examples/requests/isolate.yaml
+isolate:
+  a:
+    namespace: tenant-a
+    selector:
+      app: gateway
+  b:
+    namespace: tenant-b
+    selector:
+      app: dashboard

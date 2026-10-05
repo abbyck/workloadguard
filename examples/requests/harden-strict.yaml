@@ -1,0 +1,5 @@
+# Strict hardening: also drops all capabilities, requires a non-root user and makes the root
+# filesystem read-only. legacy/unhardened crash-loops under strict (nginx writes to /tmp).
+namespaces:
+  - legacy
+level: strict
