@@ -890,6 +890,13 @@ connectivity checks alone.
 5. Set memory limits from observed usage (metrics-server or VPA recommendations) instead
    of a flat default, and let hardening target a label selector, not only whole namespaces,
    so it can be rolled out gradually.
+6. **Apply exactly the plan that was reviewed.** Today apply works the plan out again from
+   the live objects, so if a workload changed between the dry run and the apply, the
+   result can differ from what the operator saw; the response reports it, but doesn't stop
+   it. The brief's "see what would change before it changes" could fairly be read as a
+   promise that what you saw is what you get. The fix is a `terraform plan -out` style
+   flow: the plan returns an ID tied to each workload's `resourceVersion`, apply takes that
+   ID, and it refuses any workload that changed since, asking for a new plan instead.
 
 ## Feedback on the brief
 
