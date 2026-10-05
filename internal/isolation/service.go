@@ -68,6 +68,14 @@ func (s *Service) On(ctx context.Context, r Request) (iso *Isolation, created bo
 	}
 	warnings = append(warnings, cidrWarnings...)
 
+	found, err := conflicts(ctx, s.client, r)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(found) > 0 {
+		return nil, false, &ConflictError{Policies: found}
+	}
+
 	policies := Build(r, s.podCIDRs)
 	var applied, newlyCreated []*networkingv1.NetworkPolicy
 	for _, p := range policies {

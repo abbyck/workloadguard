@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -129,5 +130,105 @@ func TestOnRefusesWhenPodCIDRsDontCoverNodes(t *testing.T) {
 	}
 	if n := managedPolicies(t, client); n != 0 {
 		t.Errorf("cluster has %d managed policies, want 0", n)
+	}
+}
+
+func policy(namespace, name string, sel metav1.LabelSelector, lbls map[string]string) *networkingv1.NetworkPolicy {
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name, Labels: lbls},
+		Spec:       networkingv1.NetworkPolicySpec{PodSelector: sel},
+	}
+}
+
+func matchLabels(kv ...string) metav1.LabelSelector {
+	return metav1.LabelSelector{MatchLabels: side("", kv...).Selector}
+}
+
+func TestOnRefusesExistingPolicies(t *testing.T) {
+	tests := []struct {
+		name         string
+		existing     *networkingv1.NetworkPolicy
+		wantConflict bool
+	}{
+		{
+			// examples/extras/preexisting-netpol.yaml: dashboard only accepts the bystander.
+			// Adding "everything except gateway" would open dashboard to every namespace.
+			name:         "restrictive policy on a target",
+			existing:     policy("tenant-b", "dashboard-allow-bystander-only", matchLabels("app", "dashboard"), nil),
+			wantConflict: true,
+		},
+		{
+			name:         "namespace-wide default deny (empty podSelector)",
+			existing:     policy("tenant-a", "default-deny", metav1.LabelSelector{}, nil),
+			wantConflict: true,
+		},
+		{
+			name: "matchExpressions selecting the target",
+			existing: policy("tenant-a", "web-tier", metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+				{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"gateway", "api"}},
+			}}, nil),
+			wantConflict: true,
+		},
+		{
+			// Two "everything except X" policies on the same pods add up to "everything".
+			name: "another workloadguard isolation on the same pods",
+			existing: policy("tenant-a", "workloadguard-iso-other-a", matchLabels("app", "gateway"),
+				map[string]string{ManagedByLabel: ManagedByValue, IDLabel: "iso-other"}),
+			wantConflict: true,
+		},
+		{
+			name:     "policy for other pods in the same namespace",
+			existing: policy("tenant-b", "db-only", matchLabels("app", "db"), nil),
+		},
+		{
+			name:     "policy in an unrelated namespace",
+			existing: policy("shared", "default-deny", metav1.LabelSelector{}, nil),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newCluster()
+			if _, err := client.NetworkingV1().NetworkPolicies(tt.existing.Namespace).Create(
+				context.Background(), tt.existing, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := newService(client).On(context.Background(), brief)
+
+			var ce *ConflictError
+			if tt.wantConflict != errors.As(err, &ce) {
+				t.Fatalf("err = %v, want ConflictError: %v", err, tt.wantConflict)
+			}
+			if !tt.wantConflict && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantConflict {
+				if len(ce.Policies) != 1 || ce.Policies[0].Name != tt.existing.Name {
+					t.Errorf("conflicts = %+v, want only %s", ce.Policies, tt.existing.Name)
+				}
+				// The refused request must not have created anything; only the pre-existing
+				// policy may be managed (when it's another isolation's).
+				wantManaged := 0
+				if tt.existing.Labels[ManagedByLabel] != "" {
+					wantManaged = 1
+				}
+				if n := managedPolicies(t, client); n != wantManaged {
+					t.Errorf("cluster has %d managed policies, want %d", n, wantManaged)
+				}
+			}
+		})
+	}
+}
+
+func TestConflictCatchesPolicyBeforePodsExist(t *testing.T) {
+	// No dashboard pod is running, but the policy would select one as soon as it starts.
+	client := fake.NewClientset(
+		ns("tenant-a", nil), ns("tenant-b", nil), node("cp", "10.244.0.0/24"),
+		pod("tenant-a", "gateway-1", map[string]string{"app": "gateway"}),
+		policy("tenant-b", "dashboard-policy", matchLabels("app", "dashboard"), nil),
+	)
+	_, _, err := newService(client).On(context.Background(), brief)
+	var ce *ConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("want ConflictError, got %v", err)
 	}
 }
