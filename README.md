@@ -613,6 +613,7 @@ apart.
 make test     # unit tests, with the race detector
 make vet      # gofmt, go vet, staticcheck (what CI runs)
 make verify   # end-to-end isolation proof against the deployed tool
+make integration   # Go tests against the kind cluster, then make verify
 ```
 
 ### Unit tests
@@ -669,6 +670,26 @@ Each of these has a comment in the test explaining it.
    filled. The memory limit is raised to the request when the default would be lower, and
    `runAsNonRoot` is skipped when something explicitly runs as root. Getting this wrong
    breaks the workload, which the brief names as the thing to avoid.
+
+### Integration tests
+
+These are behind the `integration` build tag and run against the kind cluster, in throwaway
+namespaces they delete afterwards. They cover what the fake clientset can't:
+
+- **Isolation:** real server-side apply. The stored policy matches what was built and is
+  owned by the `workloadguard` field manager. Re-applying is a no-op, a stacked isolation
+  conflicts, and off removes everything.
+- **Hardening:**
+  - plan sends a real server-side dry run, which validates and stores nothing
+    (`generation` unchanged)
+  - apply rolls out Ready, and re-applying is a no-op
+  - undo returns the template to exactly what the API server stored at creation, server
+    defaults included
+- **Concurrency:** a patch built before someone else's edit is refused by the API server
+  with a `Conflict`, because it carries the old `resourceVersion`.
+
+They aren't in CI, which would need a kind cluster per run. `make integration` runs them
+and then `hack/verify.sh`.
 
 ### End-to-end: `hack/verify.sh`
 
@@ -735,7 +756,8 @@ alone.
 - **The audit trail is the logs plus the labels and annotations on what the tool touched.**
   It doesn't emit Kubernetes Events.
 - **One replica**, so requests fail while the pod is being replaced.
-- **The integration test is a shell script** (`hack/verify.sh`) run by hand, not part of CI.
+- **Integration tests aren't in CI.** They and `hack/verify.sh` need the kind cluster and
+  are run by hand with `make integration`.
 
 ### What I'd do with more time
 
@@ -749,7 +771,7 @@ alone.
    ValidatingAdmissionPolicy, so unhardened workloads are stopped or fixed when they're
    created instead of patched afterwards.
 4. Refuse isolation for host-network pods, and emit Kubernetes Events for every action.
-5. Integration tests in Go against kind, run in CI.
+5. Run the integration tests and `verify.sh` in CI, with a kind cluster per run.
 6. The remaining bonus items.
 
 ## Time taken

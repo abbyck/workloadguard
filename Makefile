@@ -5,7 +5,7 @@ VERSION  ?= 0.1.0
 IMAGE    := workloadguard:$(VERSION)
 KUBECTL  := kubectl --context $(CONTEXT)
 
-.PHONY: all cluster samples image load deploy port-forward verify test vet clean
+.PHONY: all cluster samples image load deploy port-forward verify test integration vet clean
 
 ## all: cluster, sample workloads, build and deploy the tool, then verify
 all: cluster samples deploy verify
@@ -48,11 +48,17 @@ verify:
 test:
 	go test -race ./...
 
+## integration: Go tests against the kind cluster, then the end-to-end isolation proof
+integration:
+	go test -tags integration -count=1 ./internal/...
+	./hack/verify.sh
+
 ## vet: static checks (same as CI)
 vet:
 	test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 	go vet ./...
 	go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+	go vet -tags integration ./...
 
 ## clean: delete the kind cluster
 clean:
