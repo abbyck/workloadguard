@@ -403,3 +403,29 @@ func TestChangesAnnotationAccumulates(t *testing.T) {
 		t.Errorf("annotations = %v", d.Annotations)
 	}
 }
+
+func TestPlanRetriesConflictWithAFreshRead(t *testing.T) {
+	// Seen on kind: the deployment controller updates a workload between our list and the
+	// dry-run patch. The retry must re-read, or it conflicts on every attempt.
+	svc, client := newTestService(namespace("legacy"), deployment("legacy", "unhardened", nil))
+	gets, conflicts := 0, 0
+	client.PrependReactor("get", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		gets++
+		return false, nil, nil
+	})
+	client.PrependReactor("patch", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if conflicts == 0 {
+			conflicts++
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "unhardened",
+				errors.New("the object has been modified"))
+		}
+		return false, nil, nil
+	})
+	plan, err := svc.Plan(context.Background(), Request{Namespaces: []string{"legacy"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Workloads[0].Error != "" || gets != 1 {
+		t.Errorf("plan error %q after %d re-reads; want success after 1", plan.Workloads[0].Error, gets)
+	}
+}

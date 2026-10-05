@@ -150,11 +150,14 @@ func (s *Service) workload(ctx context.Context, k kind, o object, build patchBui
 		opts.DryRun = []string{metav1.DryRunAll}
 	}
 
-	// On a conflict (someone changed the workload since we read it), read it again and
-	// recompute, so a concurrent edit is never overwritten with stale values.
+	// On a conflict (someone changed the workload since we read it, often just its
+	// controller updating status), read it again and recompute, so a concurrent edit is
+	// never overwritten with stale values. This applies to the dry run too: it carries the
+	// resourceVersion, so retrying with the same stale object would conflict every time.
+	cur := o
+	attempt := 0
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := o
-		if !dryRun {
+		if attempt++; attempt > 1 || !dryRun {
 			var err error
 			if cur, err = k.get(ctx, s.client, o.GetNamespace(), o.GetName()); err != nil {
 				return err

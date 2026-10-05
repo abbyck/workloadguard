@@ -92,7 +92,7 @@ func TestIntegrationPlanApplyUndo(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(plan.Workloads) != 1 || plan.Workloads[0].Error != "" {
-		t.Fatalf("plan = %+v", plan.Workloads)
+		t.Fatalf("plan: %d workloads, error %q", len(plan.Workloads), plan.Workloads[0].Error)
 	}
 	after, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
 	if err != nil {
