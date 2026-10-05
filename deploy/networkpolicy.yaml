@@ -1,0 +1,17 @@
+# The API has no authentication, and the tool can patch workloads in every namespace, so no
+# pod may call it. Without this policy any pod in the cluster could reach the Service and
+# isolate or patch workloads it has no rights to.
+#
+# Still allowed:
+#   - kubectl port-forward: it connects from inside the pod's network namespace, which
+#     NetworkPolicy doesn't filter.
+#   - kubelet probes: NetworkPolicy always allows traffic from the pod's own node.
+# Egress isn't restricted: the API server's address depends on the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workloadguard-deny-ingress
+  namespace: workloadguard
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]

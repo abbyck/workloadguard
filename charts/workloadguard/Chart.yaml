@@ -4,3 +4,5 @@ description: Isolates workloads from each other with NetworkPolicies and hardens
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+# Pod Security Admission labels (GA in 1.25) and the APIs the tool uses.
+kubeVersion: ">=1.25.0-0"

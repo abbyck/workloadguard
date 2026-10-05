@@ -1,0 +1,22 @@
+{{- if .Values.networkPolicy.enabled }}
+# Same as deploy/networkpolicy.yaml: no pod may call the unauthenticated API. kubectl
+# port-forward and kubelet probes still work. ingressFrom can let a monitoring namespace
+# scrape /metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "workloadguard.fullname" . }}-deny-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "workloadguard.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  {{- with .Values.networkPolicy.ingressFrom }}
+  ingress:
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: http
+  {{- end }}
+{{- end }}

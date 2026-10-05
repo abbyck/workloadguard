@@ -38,6 +38,21 @@ logLevel: info
 # Always one replica: actions are request-driven and all state lives in the cluster (see
 # the README), so there's nothing to gain from more. Not configurable on purpose.
 
+# The API has no authentication, so by default no pod may reach it (kubectl port-forward and
+# kubelet probes still work). Add peers to ingressFrom to let, say, Prometheus scrape
+# /metrics:
+#   ingressFrom:
+#     - namespaceSelector:
+#         matchLabels: {kubernetes.io/metadata.name: monitoring}
+networkPolicy:
+  enabled: true
+  ingressFrom: []
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
 resources:
   requests:
     cpu: 50m
