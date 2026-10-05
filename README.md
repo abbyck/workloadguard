@@ -792,10 +792,6 @@ alone.
 4. Refuse isolation for host-network pods, and emit Kubernetes Events for every action.
 5. Run the integration tests and `verify.sh` in CI, with a kind cluster per run.
 
-## Time taken
-
-**TODO (author): fill in the actual time, roughly per phase.**
-
 ## Feedback on the brief
 
 - **"Prevent ... from exchanging any network traffic"** is stronger than NetworkPolicy can
