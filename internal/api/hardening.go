@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/abbyck/workloadguard/internal/hardening"
+	"github.com/abbyck/workloadguard/internal/metrics"
 )
 
 type planFunc func(context.Context, hardening.Request) (*hardening.Plan, error)
@@ -50,6 +51,7 @@ func (s *Server) apply(w http.ResponseWriter, r *http.Request, name string, appl
 		return
 	}
 	for _, wp := range plan.Workloads {
+		metrics.HardeningWorkloads.WithLabelValues(name, wp.Result).Inc()
 		log.Info(name, "workload", wp.WorkloadRef.String(), "result", wp.Result,
 			"changes", len(wp.Changes), "rollout", wp.Rollout, "error", wp.Error)
 	}

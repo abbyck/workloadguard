@@ -7,7 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/abbyck/workloadguard/internal/metrics"
 )
 
 const (
@@ -65,7 +69,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), loggerKey, log)))
 
 		level := slog.LevelInfo
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
 			level = slog.LevelDebug
 		}
 		log.Log(r.Context(), level, "request",
@@ -103,5 +107,26 @@ func limitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		next.ServeHTTP(w, r)
+	})
+}
+
+// recordMetrics counts requests by route pattern ("/v1/isolations/{id}"), not by path, so
+// IDs don't create a new time series each. It must wrap the mux directly: the mux sets
+// r.Pattern on the request it's given.
+func recordMetrics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		route := r.Pattern
+		if _, path, ok := strings.Cut(route, " "); ok {
+			route = path // "POST /v1/isolations" -> "/v1/isolations"; method is its own label
+		}
+		if route == "" || route == "/" {
+			route = "unmatched"
+		}
+		metrics.HTTPRequests.WithLabelValues(route, r.Method, strconv.Itoa(rec.status)).Inc()
+		metrics.HTTPDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
 	})
 }

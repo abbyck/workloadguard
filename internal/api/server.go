@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/abbyck/workloadguard/internal/hardening"
 	"github.com/abbyck/workloadguard/internal/isolation"
+	"github.com/abbyck/workloadguard/internal/metrics"
 )
 
 // ReadyFunc reports whether the service can do its job, i.e. reach the Kubernetes API.
@@ -35,6 +38,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.Handle("GET /metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("POST /v1/isolations", s.createIsolation)
 	mux.HandleFunc("GET /v1/isolations", s.listIsolations)
 	mux.HandleFunc("GET /v1/isolations/{id}", s.getIsolation)
@@ -50,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	var h http.Handler = mux
+	h = recordMetrics(h) // innermost: it reads the route pattern the mux sets on the request
 	h = limitBody(h)
 	h = s.recoverPanics(h)
 	h = s.logRequests(h)

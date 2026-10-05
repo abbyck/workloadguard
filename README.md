@@ -123,6 +123,7 @@ Example request bodies are in [examples/requests/](examples/requests/).
 | `POST /v1/hardening/apply` | Apply the same plan and report the result per workload. |
 | `POST /v1/hardening/undo/plan`, `/undo/apply` | Show, then revert, what hardening set (see [Undo](#undo)). |
 | `GET /healthz`, `GET /readyz` | Liveness, and readiness (the Kubernetes API is reachable). |
+| `GET /metrics` | Prometheus metrics (see [Metrics](#metrics)). |
 
 ### Isolation
 
@@ -235,6 +236,21 @@ The apply response is the same structure with `dryRun: false`, and each workload
 
 Apply works the plan out again from the live objects. It reports what it actually changed,
 even if something changed since the dry run.
+
+### Metrics
+
+`GET /metrics` serves Prometheus metrics from a dedicated registry:
+
+| Metric | Type | Labels | Notes |
+|---|---|---|---|
+| `workloadguard_http_requests_total` | counter | `route`, `method`, `code` | `route` is the pattern, e.g. `/v1/isolations/{id}`, so IDs don't create new series; unknown paths are `unmatched` |
+| `workloadguard_http_request_duration_seconds` | histogram | `route` | Buckets up to 3 minutes, because hardening apply waits for rollouts |
+| `workloadguard_isolations_active` | gauge | | Counted from the cluster at scrape time (one list call). It stays right across restarts and manual deletes, and is left out of a scrape if the count fails, rather than reported as 0 |
+| `workloadguard_hardening_workloads_total` | counter | `operation` (`hardening`/`undo`), `result` (`patched`/`failed`) | |
+| `workloadguard_kube_api_requests_total` | counter | `method`, `code` | Every Kubernetes API call, through client-go's metrics hooks. A rise in `403` means missing RBAC |
+| `workloadguard_kube_api_request_duration_seconds` | histogram | `verb` | |
+
+Plus the standard Go runtime and process metrics.
 
 ### Errors
 
@@ -719,7 +735,6 @@ alone.
 - **The audit trail is the logs plus the labels and annotations on what the tool touched.**
   It doesn't emit Kubernetes Events.
 - **One replica**, so requests fail while the pod is being replaced.
-- **No metrics endpoint.**
 - **The integration test is a shell script** (`hack/verify.sh`) run by hand, not part of CI.
 
 ### What I'd do with more time

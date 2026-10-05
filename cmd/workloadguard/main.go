@@ -22,6 +22,7 @@ import (
 	"github.com/abbyck/workloadguard/internal/hardening"
 	"github.com/abbyck/workloadguard/internal/isolation"
 	"github.com/abbyck/workloadguard/internal/kube"
+	"github.com/abbyck/workloadguard/internal/metrics"
 )
 
 type config struct {
@@ -65,6 +66,7 @@ func run(cfg config, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	metrics.RegisterClientGo()
 	client, err := kube.NewClient(cfg.kube)
 	if err != nil {
 		return fmt.Errorf("create kubernetes client: %w", err)
@@ -81,10 +83,16 @@ func run(cfg config, log *slog.Logger) error {
 	g := guard.New(splitList(cfg.protected), ownNamespace())
 	log.Info("protected namespaces", "namespaces", g.Protected())
 
+	iso := isolation.NewService(client, g, podCIDRs)
+	metrics.RegisterIsolations(func(ctx context.Context) (int, error) {
+		list, err := iso.List(ctx)
+		return len(list), err
+	})
+
 	srv := &http.Server{
 		Addr: cfg.listen,
 		Handler: api.New(log, apiReachable(client),
-			isolation.NewService(client, g, podCIDRs),
+			iso,
 			hardening.NewService(client, g, defaults, cfg.rolloutTimeout),
 		).Handler(),
 		// Bounded so slow or stuck clients can't hold connections forever. WriteTimeout
