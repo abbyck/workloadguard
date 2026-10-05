@@ -181,5 +181,7 @@ func (h *hardener) resources(c *corev1.Container) {
 		}
 		c.Resources.Limits[corev1.ResourceMemory] = limit
 		h.set(c.Name, "resources.limits.memory", limit.String())
+		h.note("container %s gets a %s memory limit; if it uses more it will be OOM-killed, possibly long after "+
+			"the rollout. Check its usage first (kubectl top pod --containers)", c.Name, limit.String())
 	}
 }

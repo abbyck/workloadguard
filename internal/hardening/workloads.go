@@ -146,6 +146,15 @@ func rolloutStatus(o object) (done, final bool, msg string) {
 			return false, false, "waiting for the controller to see the change"
 		}
 		want := replicas(w.Spec.Replicas)
+		// A partitioned rolling update only replaces pods with an ordinal at or above the
+		// partition; the rest keep the old template until the partition is lowered.
+		if p := partition(w); p > 0 {
+			wantUpdated := max(want-p, 0)
+			if w.Status.UpdatedReplicas >= wantUpdated && w.Status.ReadyReplicas == want {
+				return true, true, fmt.Sprintf("ready; partition %d keeps pods below ordinal %d on the old template", p, p)
+			}
+			return false, false, fmt.Sprintf("%d of %d pods above the partition updated, %d ready", w.Status.UpdatedReplicas, wantUpdated, w.Status.ReadyReplicas)
+		}
 		if w.Status.UpdatedReplicas == want && w.Status.ReadyReplicas == want && w.Status.CurrentRevision == w.Status.UpdateRevision {
 			return true, true, "ready"
 		}
@@ -164,6 +173,13 @@ func rolloutStatus(o object) (done, final bool, msg string) {
 		return false, false, fmt.Sprintf("%d of %d pods updated, %d available", w.Status.UpdatedNumberScheduled, want, w.Status.NumberAvailable)
 	}
 	panic(fmt.Sprintf("unsupported workload type %T", o))
+}
+
+func partition(s *appsv1.StatefulSet) int32 {
+	if ru := s.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.Partition != nil {
+		return *ru.Partition
+	}
+	return 0
 }
 
 func replicas(r *int32) int32 {

@@ -2,6 +2,7 @@ package hardening
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -49,6 +50,16 @@ func TestBaselineOnBareSpec(t *testing.T) {
 	// Never a CPU limit.
 	if _, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
 		t.Error("CPU limit was set")
+	}
+}
+
+func TestMemoryLimitComesWithAWarning(t *testing.T) {
+	// A new memory limit is the most likely way baseline hardening breaks a workload, and it
+	// can happen long after the rollout, so the plan must say so.
+	spec := &corev1.PodSpec{Containers: []corev1.Container{{Name: "web"}}}
+	_, notes := hardenPodSpec(spec, Baseline, testDefaults, false)
+	if len(notes) != 1 || !strings.Contains(notes[0], "OOM-killed") {
+		t.Errorf("notes = %v, want one OOM warning", notes)
 	}
 }
 

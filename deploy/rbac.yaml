@@ -38,6 +38,10 @@ rules:
   - apiGroups: [apps]
     resources: [deployments, statefulsets, daemonsets]
     verbs: [get, list, patch]
+  # Hardening: ReplicaSets not owned by a Deployment are only reported.
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [list]
   # Hardening: Jobs and CronJobs are only reported.
   - apiGroups: [batch]
     resources: [jobs, cronjobs]

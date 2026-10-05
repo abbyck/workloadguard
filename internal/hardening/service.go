@@ -125,6 +125,15 @@ func (s *Service) namespace(ctx context.Context, ns string, level Level, dryRun 
 				plan.Skipped = append(plan.Skipped, Skipped{WorkloadRef: ref, Reason: err.Error()})
 				continue
 			}
+			if owner := metav1.GetControllerOf(o); owner != nil {
+				// Operator-managed (a StatefulSet created by a database operator, say). The
+				// operator would put its own template back, so a patch here only causes
+				// repeated rollouts. The fix belongs in the owning resource.
+				plan.Skipped = append(plan.Skipped, Skipped{WorkloadRef: ref, Reason: fmt.Sprintf(
+					"managed by %s %s: it would revert the patch; set these fields through the %s instead",
+					owner.Kind, owner.Name, owner.Kind)})
+				continue
+			}
 			build := func(cur object) ([]Change, []string, []byte, error) {
 				return s.buildPatch(k, cur, level, skipResources)
 			}
@@ -207,7 +216,10 @@ func (s *Service) buildPatch(k kind, o object, level Level, skipResources bool) 
 	all := changes
 	if prev := o.GetAnnotations()[ChangesAnnotation]; prev != "" {
 		var earlier []Change
-		if err := json.Unmarshal([]byte(prev), &earlier); err == nil {
+		if err := json.Unmarshal([]byte(prev), &earlier); err != nil {
+			notes = append(notes, "the existing "+ChangesAnnotation+" annotation isn't valid JSON and is replaced; "+
+				"undo can't revert fields from earlier runs")
+		} else {
 			all = append(earlier, changes...)
 		}
 	}
@@ -278,6 +290,11 @@ func (s *Service) hasLimitRangeDefaults(ctx context.Context, ns string) (bool, e
 	return false, nil
 }
 
+// coveredOwnerKinds are pod owners that hardening already handles: patched (ReplicaSets of
+// Deployments, StatefulSets, DaemonSets), reported (Jobs, standalone ReplicaSets), or static
+// pods mirrored from a node's manifest files, which the API can't change.
+var coveredOwnerKinds = map[string]bool{"ReplicaSet": true, "StatefulSet": true, "DaemonSet": true, "Job": true, "Node": true}
+
 // reportOnly lists workloads the tool doesn't patch but that would need changes.
 func (s *Service) reportOnly(ctx context.Context, ns string, level Level, skipResources bool, plan *Plan) error {
 	report := func(kind, name string, spec corev1.PodSpec, reason string) {
@@ -291,9 +308,29 @@ func (s *Service) reportOnly(ctx context.Context, ns string, level Level, skipRe
 		return fmt.Errorf("list pods in %s: %w", ns, err)
 	}
 	for _, p := range pods.Items {
-		if len(p.OwnerReferences) == 0 {
+		owner := metav1.GetControllerOf(&p)
+		switch {
+		case owner == nil:
 			report("Pod", p.Name, p.Spec, "bare Pod: reported, not patched. Most securityContext fields can't change "+
 				"on a running pod and nothing would recreate it; fix its manifest")
+		case !coveredOwnerKinds[owner.Kind]:
+			report("Pod", p.Name, p.Spec, fmt.Sprintf("managed by %s %s: reported, not patched; set these fields "+
+				"through the %s", owner.Kind, owner.Name, owner.Kind))
+		}
+	}
+	replicaSets, err := s.client.AppsV1().ReplicaSets(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list ReplicaSets in %s: %w", ns, err)
+	}
+	for _, rs := range replicaSets.Items {
+		owner := metav1.GetControllerOf(&rs)
+		switch {
+		case owner == nil:
+			report("ReplicaSet", rs.Name, rs.Spec.Template.Spec, "standalone ReplicaSet: reported, not patched; "+
+				"use a Deployment, or fix its manifest")
+		case owner.Kind != "Deployment":
+			report("ReplicaSet", rs.Name, rs.Spec.Template.Spec, fmt.Sprintf("managed by %s %s: reported, not patched; "+
+				"set these fields through the %s", owner.Kind, owner.Name, owner.Kind))
 		}
 	}
 	jobs, err := s.client.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{})
@@ -364,13 +401,15 @@ func (s *Service) waitForRollout(ctx context.Context, ref WorkloadRef) string {
 		if problems := s.settledProblems(ctx, last); problems != "" {
 			return "rolled out, but pods are failing: " + problems
 		}
-		return "ready"
+		return msg // "ready", possibly with a qualifier such as a StatefulSet partition
 	case errors.Is(err, errFinal):
 		return msg
 	}
 	out := fmt.Sprintf("not ready after %s: %s", s.rolloutTimeout, msg)
 	if last != nil {
-		if problems := s.podProblems(ctx, last); problems != "" {
+		// Old pods are still running here, so only states that point at the new template
+		// count, not restart counts, which old pods may have collected for other reasons.
+		if problems := s.podProblems(ctx, last, false); problems != "" {
 			out += "; " + problems
 		}
 	}
@@ -386,15 +425,16 @@ func (s *Service) settledProblems(ctx context.Context, o object) string {
 		case <-time.After(s.settle):
 		}
 	}
-	return s.podProblems(ctx, o)
+	// After a completed rollout only new pods are left, so restarts are theirs.
+	return s.podProblems(ctx, o, true)
 }
 
 var errFinal = errors.New("rollout won't progress on its own")
 
 // podProblems summarizes containers of the workload's pods that are failing: stuck waiting
 // (CrashLoopBackOff, or CreateContainerConfigError, which is what runAsNonRoot gives a root
-// image), exited with an error, or restarted.
-func (s *Service) podProblems(ctx context.Context, o object) string {
+// image), exited with an error, or, if countRestarts, restarted.
+func (s *Service) podProblems(ctx context.Context, o object, countRestarts bool) string {
 	sel, err := metav1.LabelSelectorAsSelector(selector(o))
 	if err != nil {
 		return ""
@@ -411,7 +451,7 @@ func (s *Service) podProblems(ctx context.Context, o object) string {
 			continue // old pod on its way out
 		}
 		for _, st := range append(p.Status.InitContainerStatuses, p.Status.ContainerStatuses...) {
-			if problem := containerProblem(st); problem != "" {
+			if problem := containerProblem(st, countRestarts); problem != "" {
 				problems = append(problems, fmt.Sprintf("pod %s container %s: %s", p.Name, st.Name, problem))
 			}
 		}
@@ -419,13 +459,13 @@ func (s *Service) podProblems(ctx context.Context, o object) string {
 	return strings.Join(problems, ", ")
 }
 
-func containerProblem(st corev1.ContainerStatus) string {
+func containerProblem(st corev1.ContainerStatus, countRestarts bool) string {
 	switch {
 	case st.State.Waiting != nil && st.State.Waiting.Reason != "ContainerCreating" && st.State.Waiting.Reason != "PodInitializing":
 		return st.State.Waiting.Reason
 	case st.State.Terminated != nil && st.State.Terminated.ExitCode != 0:
 		return fmt.Sprintf("%s (exit %d)", st.State.Terminated.Reason, st.State.Terminated.ExitCode)
-	case st.RestartCount > 0:
+	case countRestarts && st.RestartCount > 0:
 		return fmt.Sprintf("restarted %d times", st.RestartCount)
 	}
 	return ""

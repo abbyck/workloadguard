@@ -57,9 +57,8 @@ func (w WorkloadRef) String() string { return w.Kind + " " + w.Namespace + "/" +
 
 // Apply results.
 const (
-	ResultPatched   = "patched"
-	ResultUnchanged = "unchanged"
-	ResultFailed    = "failed"
+	ResultPatched = "patched"
+	ResultFailed  = "failed"
 )
 
 // WorkloadPlan is what hardening does (plan) or did (apply) to one workload.

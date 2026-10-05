@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -234,7 +236,7 @@ func TestPlanScope(t *testing.T) {
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}
 	owned := bare.DeepCopy()
 	owned.Name = "unhardened-abc"
-	owned.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "unhardened-abc", UID: "1"}}
+	owned.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "unhardened-abc", UID: "1", Controller: ptr.To(true)}}
 
 	svc, _ := newTestService(namespace("legacy"),
 		deployment("legacy", "unhardened", nil),
@@ -340,6 +342,15 @@ func TestRolloutStatus(t *testing.T) {
 		{"paused", dep(2, 2, 2, 0, 2, 2, true), false, true},
 		{"statefulset OnDelete", &appsv1.StatefulSet{Spec: appsv1.StatefulSetSpec{
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{Type: appsv1.OnDeleteStatefulSetStrategyType}}}, false, true},
+		// partition 2 of 3: only ordinal 2 is replaced, so one updated pod means done.
+		{"statefulset partition reached", &appsv1.StatefulSet{
+			Spec: appsv1.StatefulSetSpec{Replicas: ptr.To[int32](3), UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](2)}}},
+			Status: appsv1.StatefulSetStatus{UpdatedReplicas: 1, ReadyReplicas: 3, CurrentRevision: "a", UpdateRevision: "b"}}, true, true},
+		{"statefulset partition not reached", &appsv1.StatefulSet{
+			Spec: appsv1.StatefulSetSpec{Replicas: ptr.To[int32](3), UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](2)}}},
+			Status: appsv1.StatefulSetStatus{UpdatedReplicas: 0, ReadyReplicas: 3}}, false, false},
 		{"daemonset rolled out", &appsv1.DaemonSet{Status: appsv1.DaemonSetStatus{
 			DesiredNumberScheduled: 3, UpdatedNumberScheduled: 3, NumberAvailable: 3}}, true, true},
 	}
@@ -365,15 +376,103 @@ func TestContainerProblem(t *testing.T) {
 		// What runAsNonRoot does to an image that runs as root.
 		{"refused by kubelet", corev1.ContainerStatus{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError"}}}, "CreateContainerConfigError"},
 		{"just exited", corev1.ContainerStatus{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1}}}, "Error (exit 1)"},
-		// Running again right now, but it crashed since the rollout: no readiness probe hides this.
-		{"restarted", corev1.ContainerStatus{RestartCount: 2, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}, "restarted 2 times"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := containerProblem(tt.st); got != tt.want {
+			if got := containerProblem(tt.st, true); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+
+	// Running again right now, but it crashed since the rollout: no readiness probe hides this.
+	restarted := corev1.ContainerStatus{RestartCount: 2, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+	if got := containerProblem(restarted, true); got != "restarted 2 times" {
+		t.Errorf("after a completed rollout: got %q, want the restart count", got)
+	}
+	// Mid-rollout, old pods are still there, and their restarts may have nothing to do with
+	// the new template, so they mustn't be reported against it.
+	if got := containerProblem(restarted, false); got != "" {
+		t.Errorf("mid-rollout: got %q, want restarts ignored", got)
+	}
+}
+
+func TestOperatorOwnedWorkloadsAreSkipped(t *testing.T) {
+	// A StatefulSet created by an operator: the operator would put its own template back,
+	// so patching it only causes repeated rollouts.
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "legacy", Name: "db", ResourceVersion: "1",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "postgres.example/v1", Kind: "PostgresCluster",
+				Name: "db", UID: "1", Controller: ptr.To(true)}}},
+		Spec: appsv1.StatefulSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "db"}},
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "db"}}}},
+		},
+	}
+	svc, client := newTestService(namespace("legacy"), sts)
+	plan, err := svc.Apply(context.Background(), Request{Namespaces: []string{"legacy"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Workloads) != 0 || len(plan.Skipped) != 1 || !strings.Contains(plan.Skipped[0].Reason, "PostgresCluster db") {
+		t.Fatalf("workloads %+v, skipped %+v; want the StatefulSet skipped, naming its owner", plan.Workloads, plan.Skipped)
+	}
+	got, err := client.AppsV1().StatefulSets("legacy").Get(context.Background(), "db", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Template.Spec.SecurityContext != nil {
+		t.Error("operator-owned StatefulSet was patched")
+	}
+}
+
+func TestReportsReplicaSetsAndPodsTheToolDoesNotPatch(t *testing.T) {
+	controller := func(kind, name string) []metav1.OwnerReference {
+		return []metav1.OwnerReference{{Kind: kind, Name: name, UID: "1", Controller: ptr.To(true)}}
+	}
+	rs := func(name string, owners []metav1.OwnerReference) *appsv1.ReplicaSet {
+		return &appsv1.ReplicaSet{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "legacy", Name: name, OwnerReferences: owners},
+			Spec:       appsv1.ReplicaSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}},
+		}
+	}
+	pod := func(name string, owners []metav1.OwnerReference) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "legacy", Name: name, OwnerReferences: owners},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}
+	}
+	svc, _ := newTestService(namespace("legacy"),
+		rs("web-abc", controller("Deployment", "web")),    // the Deployment is what gets patched
+		rs("standalone", nil),                             // nothing would patch it
+		rs("canary-abc", controller("Rollout", "canary")), // e.g. Argo Rollouts
+		pod("web-abc-1", controller("ReplicaSet", "web-abc")),
+		pod("static-node1", controller("Node", "node1")), // static pod: the API can't change it
+		pod("task-1", controller("TaskRun", "task")),     // created directly by an operator
+	)
+	plan, err := svc.Plan(context.Background(), Request{Namespaces: []string{"legacy"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported []string
+	for _, s := range plan.Skipped {
+		reported = append(reported, s.Kind+"/"+s.Name)
+	}
+	slices.Sort(reported)
+	want := []string{"Pod/task-1", "ReplicaSet/canary-abc", "ReplicaSet/standalone"}
+	if !reflect.DeepEqual(reported, want) {
+		t.Errorf("reported %v, want %v", reported, want)
+	}
+}
+
+func TestCorruptChangeRecordIsReported(t *testing.T) {
+	d := deployment("legacy", "unhardened", nil)
+	d.Annotations = map[string]string{ChangesAnnotation: "{not json"}
+	svc, _ := newTestService(namespace("legacy"), d)
+	plan, err := svc.Plan(context.Background(), Request{Namespaces: []string{"legacy"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plan.Workloads[0].Notes, " "), "isn't valid JSON") {
+		t.Errorf("notes = %v, want a warning that the old change record is replaced", plan.Workloads[0].Notes)
 	}
 }
 
