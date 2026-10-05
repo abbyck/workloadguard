@@ -1,0 +1,67 @@
+# One replica is enough: actions are request-driven and all state lives in the cluster as
+# labeled objects, so a restarted pod picks up exactly where the last one left off.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workloadguard
+  namespace: workloadguard
+  labels:
+    app: workloadguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workloadguard
+  template:
+    metadata:
+      labels:
+        app: workloadguard
+    spec:
+      serviceAccountName: workloadguard
+      # Longer than --shutdown-timeout, so in-flight requests can finish on SIGTERM.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: workloadguard
+          image: workloadguard:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen=:8080
+            - --shutdown-timeout=20s
+            - --pod-cidrs=10.244.0.0/16
+            - --rollout-timeout=90s
+          env:
+            # The tool's own namespace is always protected.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

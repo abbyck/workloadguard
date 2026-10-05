@@ -419,3 +419,34 @@ An undo endpoint, `POST /v1/hardening/undo` with the same body, would:
 One caveat: if the workload is managed by GitOps (Argo CD, Flux), the controller reverts the
 patch on its next sync anyway. Hardening and undo there are only a stopgap; the real fix
 belongs in the source manifests.
+
+### Running the tool
+
+- **One replica.** Actions are request-driven and all state lives in the cluster as labeled
+  objects, so there's nothing to share between replicas or recover after a restart. A
+  replacement pod picks up exactly where the last one stopped. On SIGTERM the pod finishes
+  in-flight requests (up to `--shutdown-timeout`, 20s) before exiting. I checked this by
+  deleting the pod 3 seconds into a hardening apply: the request still returned a complete
+  `200`. An apply that waits longer than the shutdown timeout for rollouts loses its report,
+  but each workload's patch is atomic, so the cluster stays consistent; re-running the
+  request reports them as unchanged.
+- **The tool passes its own checks.** Its pod runs as non-root with a read-only root
+  filesystem, all capabilities dropped and the RuntimeDefault seccomp profile, with
+  resources and probes set. Its namespace enforces Pod Security Admission `restricted`, and
+  a hardening plan against it, at both levels, finds nothing to change.
+- **Least-privilege RBAC, cluster-scoped.** Isolation and hardening target namespaces chosen
+  per request, so the role can't be namespaced. Every rule maps to an API call the tool
+  makes, with no wildcards:
+
+  | Resource | Verbs | Used for |
+  |---|---|---|
+  | namespaces | get | Target exists; opt-out label |
+  | pods | list | Selector matches (isolation); bare Pods and rollout failures (hardening) |
+  | nodes | list | Checking `--pod-cidrs` covers every node |
+  | limitranges | list | Leave resources to a LimitRange with defaults |
+  | networkpolicies | get, list, create, patch, delete | Isolation on (server-side apply needs `create` for new objects), off, conflicts |
+  | deployments, statefulsets, daemonsets | get, list, patch | Hardening and rollout status |
+  | jobs, cronjobs | list | Reported only |
+
+  Testing in the cluster caught one gap: server-side apply of a new NetworkPolicy also
+  needs `create`, not just `patch`.

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workloadguard
+  labels:
+    # The tool's own namespace is always protected; Pod Security Admission enforces that
+    # the tool itself meets the restricted profile.
+    pod-security.kubernetes.io/enforce: restricted

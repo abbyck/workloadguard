@@ -1,0 +1,14 @@
+# ClusterIP only: the API has no authentication, so it's reached with kubectl port-forward,
+# which already requires cluster access.
+apiVersion: v1
+kind: Service
+metadata:
+  name: workloadguard
+  namespace: workloadguard
+spec:
+  selector:
+    app: workloadguard
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

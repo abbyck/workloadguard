@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workloadguard
+  namespace: workloadguard
+---
+# Cluster-scoped because isolation and hardening target arbitrary namespaces chosen per
+# request. Every rule maps to an API call the tool makes; there are no wildcards.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workloadguard
+rules:
+  # Check that target namespaces exist and read their opt-out label.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]
+  # Isolation: pods a selector matches (validation, conflicts). Hardening: bare pods to
+  # report, and pod status when a rollout fails.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  # Isolation: check node pod CIDRs are covered by --pod-cidrs.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [list]
+  # Hardening: a LimitRange with defaults means resources are left to it.
+  - apiGroups: [""]
+    resources: [limitranges]
+    verbs: [list]
+  # Isolation: find conflicting and own policies (list), check existence (get), write via
+  # server-side apply (patch, plus create: SSA needs it when the object doesn't exist yet),
+  # turn off (delete).
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, create, patch, delete]
+  # Hardening: read, patch and watch the rollout of pod templates.
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list, patch]
+  # Hardening: Jobs and CronJobs are only reported.
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workloadguard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workloadguard
+subjects:
+  - kind: ServiceAccount
+    name: workloadguard
+    namespace: workloadguard
