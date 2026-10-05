@@ -81,7 +81,7 @@ Response:
   what it deleted. If they're already gone it returns `200` with an empty list.
 - **Existing NetworkPolicies on the targets block the request** with `409` and a list of those
   policies. Adding isolation on top of them would widen access, because NetworkPolicies are
-  combined with OR. See [Decisions](#decisions) (to be written).
+  combined with OR. See [Existing NetworkPolicies](#existing-networkpolicies-are-refused-not-merged).
 - **`warnings`** flags things that are allowed but suspicious, such as a selector that currently
   matches no pods.
 
@@ -155,3 +155,112 @@ objects, so moving to a CRD later would mostly mean replacing the HTTP layer.
 The API has no authentication. It's reachable only from inside the cluster or through
 `kubectl port-forward`, which already requires cluster access. In production it would need
 authentication and authorization, or the CRD approach above.
+
+## Decisions
+
+### Isolation
+
+#### How isolation works
+
+NetworkPolicy can only allow traffic. There is no "deny A to B" rule. So isolation creates
+one policy per side. Each selects that side's pods for both ingress and egress, which makes
+them deny-by-default, and then allows everything except the other side:
+
+1. Pods in every namespace other than the peer's.
+2. Pods in the peer's namespace that don't match the peer's selector. The selector is an AND
+   of labels, so "not the peer" is an OR, `k1≠v1 OR k2≠v2`. That takes one rule per label,
+   because conditions inside a single rule are ANDed. Combining them into one rule would cut
+   off pods that share only one label with the peer.
+3. An `ipBlock` for everything that isn't a pod: external addresses, nodes (kubelet probes)
+   and host-network pods. **It excludes the pod CIDRs.** kindnet, like most CNIs, matches
+   `ipBlock` against pod IPs as well. With a bare `0.0.0.0/0`, the peer gets straight back in.
+   I checked this on kind: removing the exclusion reopened A↔B.
+
+Either policy alone blocks A↔B. Having both means one deleted or broken policy doesn't
+reopen the connection.
+
+The cluster's pod CIDR isn't available through the Kubernetes API, so it's the
+`--pod-cidrs` flag (default `10.244.0.0/16`, kind's default). Every isolation request
+checks that each node's `spec.podCIDRs` falls inside it, and refuses with `500` if not.
+A node added later with a new range is caught instead of silently leaking.
+
+#### Pods coming and going
+
+Policies select pods by label, not by name or IP. New replicas, restarts, rescheduled
+pods and scale-ups are covered as soon as they start. Nothing has to watch for them.
+I checked this on kind by restarting the gateway (all pods replaced, new IPs) and
+scaling the dashboard up while isolated; the new pods were blocked straight away.
+
+What follows from this:
+
+- **A pod whose labels change leaves or joins the isolation** with them. That's the
+  NetworkPolicy model, and it's consistent with how Services select pods.
+- **Connections already open when isolation turns on may survive.** Enforcement depends
+  on the CNI, and some only check new connections. To contain a live compromise, restart
+  the pods after isolating them.
+- **A selector matching no pods is allowed**, with a warning in the response. The policy
+  applies to pods created later, but it's often a typo.
+
+#### Existing NetworkPolicies are refused, not merged
+
+If any NetworkPolicy already selects either side's pods, the request fails with `409` and
+lists those policies. This includes a namespace-wide default deny (empty `podSelector`).
+
+NetworkPolicies combine with OR. Say the dashboard only accepts traffic from one client
+([examples/extras/preexisting-netpol.yaml](examples/extras/preexisting-netpol.yaml)).
+Adding "allow everything except the gateway" would open it to every namespace: the
+opposite of what an operator isolating a compromise wants. It would also make
+"restore previous connectivity" meaningless, because the tool would have changed what
+the old policy allowed.
+
+**Other workloadguard isolations count as conflicts too.** "Everything except B" plus
+"everything except C" on the same pods adds up to "everything", so two isolations on the
+same workload would cancel each other out. The tool refuses the second instead.
+
+The trade-off: you can't isolate a workload that already has NetworkPolicies, or isolate
+one workload from two peers at once. The production answer is
+[AdminNetworkPolicy](https://network-policy-api.sigs.k8s.io/) or CNI-specific policies
+(Calico, Cilium). Those have real deny rules that take priority over NetworkPolicies
+instead of being combined with them.
+
+#### Turning isolation off
+
+Isolation only ever adds policies, and it refuses to combine with existing ones. So
+deleting what it added restores the previous connectivity exactly. Off deletes only the
+policies labeled with that isolation's ID, with a UID check, so other policies in the
+same namespaces, including other isolations, are untouched. Deleting something already
+gone is a success, so retries are safe.
+
+#### State and retries
+
+The tool keeps no state in memory. Isolations are the labeled NetworkPolicies
+themselves, and the original request is stored as an annotation. The ID is a hash of
+the request with the sides in a fixed order:
+
+- Re-sending a request, or swapping `a` and `b`, finds the same isolation instead of
+  making a second one.
+- Restarting the tool changes nothing. Isolation keeps blocking while it's down, because
+  the CNI enforces the policies, not the tool.
+- Policies are written with server-side apply, so re-sending a request also repairs
+  manual edits to them.
+- If the second policy fails, the first is rolled back (unless it already existed), so a
+  failed request doesn't leave half an isolation behind.
+- Cluster changes run under a context that ignores client disconnects, with their own
+  timeout. A dropped `kubectl port-forward` can't stop a request halfway.
+
+#### Which requests are rejected
+
+- **Empty selectors.** They would select every pod in the namespace.
+- **Selectors that could match the same pod, in the same namespace.** `{app: gateway}` and
+  `{tier: edge}` are rejected even if no pod carries both labels yet, because one could
+  later, and a pod can't be isolated from itself. They count as separate only when some
+  label key has different values on each side.
+- **Protected targets**, with `403`. These are system namespaces, the tool's own namespace,
+  and anything labeled `workloadguard.io/ignore=true`, including the pods the selector
+  currently matches.
+- **Unknown fields**, such as `selecter:`. A typo shouldn't silently turn into an empty
+  selector.
+
+Selectors are exact label matches only (`matchLabels`), as in the brief's example.
+Supporting `matchExpressions` would mean negating arbitrary expressions, which is where
+bugs come from.
