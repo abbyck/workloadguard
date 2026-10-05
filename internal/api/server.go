@@ -36,6 +36,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("POST /v1/isolations", s.createIsolation)
+	mux.HandleFunc("GET /v1/isolations", s.listIsolations)
+	mux.HandleFunc("GET /v1/isolations/{id}", s.getIsolation)
+	mux.HandleFunc("DELETE /v1/isolations/{id}", s.deleteIsolation)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no route for "+r.Method+" "+r.URL.Path)
 	})

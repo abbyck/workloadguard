@@ -51,6 +51,7 @@ func writeRequestError(w http.ResponseWriter, err error) {
 		inv *isolation.InvalidError
 		nf  *isolation.NamespaceNotFoundError
 		ce  *isolation.ConflictError
+		inf *isolation.NotFoundError
 	)
 	switch {
 	case errors.As(err, &re):
@@ -61,6 +62,8 @@ func writeRequestError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_request", inv.Error())
 	case errors.As(err, &nf):
 		writeError(w, http.StatusBadRequest, "namespace_not_found", nf.Error())
+	case errors.As(err, &inf):
+		writeError(w, http.StatusNotFound, "isolation_not_found", inf.Error())
 	case errors.As(err, &ce):
 		writeError(w, http.StatusConflict, "existing_policies", ce.Error())
 	default:

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
+	"strings"
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -151,6 +153,15 @@ func fromPolicies(policies []*networkingv1.NetworkPolicy) (*Isolation, error) {
 			policies[0].Namespace, policies[0].Name, RequestAnnotation, err)
 	}
 	iso := &Isolation{ID: policies[0].Labels[IDLabel], A: r.A, B: r.B, Warnings: []string{}}
+	if len(policies) != 2 {
+		// One side's policy was deleted by hand, or a removal was interrupted. The remaining
+		// policy still blocks A<->B, but the operator should know.
+		iso.Warnings = append(iso.Warnings, fmt.Sprintf("incomplete: %d of 2 policies present; "+
+			"re-send the request to repair it or delete the isolation", len(policies)))
+	}
+	slices.SortFunc(policies, func(a, b *networkingv1.NetworkPolicy) int {
+		return strings.Compare(a.Labels[SideLabel], b.Labels[SideLabel])
+	})
 	for _, p := range policies {
 		iso.Policies = append(iso.Policies, ObjectRef{Namespace: p.Namespace, Name: p.Name})
 		if t := p.CreationTimestamp.Time; iso.CreatedAt.IsZero() || (!t.IsZero() && t.Before(iso.CreatedAt)) {
