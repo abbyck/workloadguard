@@ -366,10 +366,35 @@ The brief leaves these open:
 
 My own decisions beyond those:
 
+- [One-shot actions, and how the tool behaves over time](#one-shot-actions-and-how-the-tool-behaves-over-time)
 - [How the policies express "everything except B"](#how-isolation-works)
 - [Refusing to combine with existing NetworkPolicies](#existing-networkpolicies-are-refused-not-merged)
 - [Keeping state in the cluster](#state-and-retries)
 - [Running the tool](#running-the-tool): one replica, RBAC
+
+### One-shot actions, and how the tool behaves over time
+
+The brief asks to "think about how it behaves over time and when things aren't healthy".
+Both tasks are "on demand", so I built one-shot actions, not a controller that keeps
+reconciling. I read "over time" as being about the service's lifecycle: what happens
+between requests, and while the tool itself is restarting or the cluster is unhealthy.
+
+| Over time… | What happens |
+|---|---|
+| The tool restarts, crashes or is down | Isolation keeps blocking: the CNI enforces the NetworkPolicies, not the tool. Nothing is kept in memory, so a new pod picks up exactly where the old one stopped (tested on kind by restarting it while isolated). |
+| Pods come and go | Policies select by label, so new replicas and rescheduled pods are covered at once (`verify.sh` restarts the gateway while isolated). |
+| The Kubernetes API is unhealthy | `/readyz` fails without restarting the pod; every call has a timeout; conflicts are retried; a half-applied isolation is rolled back. |
+| A rollout goes wrong after hardening | Apply waits for each rollout and watches the new pods, and reports crash loops instead of a silently stuck rollout. |
+| Someone deletes one of an isolation's policies | Shown as "incomplete" on `GET`. Re-sending the request repairs it. |
+| Someone adds a NetworkPolicy that reopens traffic, or a host-network or opted-out pod starts matching | **Not noticed.** Checked only when a request is made. |
+| New unhardened workloads appear, or hardened ones drift | **Not watched.** Hardening is on demand. |
+
+The last two rows are the trade-off. The next step would be a background drift check that
+re-runs the request-time checks against every active isolation, and exposes what it finds
+as a metric and in `GET` warnings for alerting. It wouldn't repair anything on its own: if
+a person deleted a policy, putting it back silently would fight them. The long-term answer
+is a controller (see [what I'd do with more time](#what-id-do-with-more-time)), and
+admission policies for hardening, so new workloads can't arrive unhardened.
 
 ### Isolation
 
@@ -914,6 +939,11 @@ connectivity checks alone.
   both fair. It decides whether a solution is safe.
 - **"Namespace(s)" in the isolation story vs one namespace per side in the example.** I
   supported one namespace per side and would ask which was meant.
+- **"Think about how it behaves over time": one-shot or continuous?** Both tasks say "on
+  demand", which suggests one-shot actions, but "over time" could also mean the tool should
+  keep enforcing: noticing a deleted policy or a new one that reopens traffic. I built
+  one-shot actions on cluster-native state, and explained what that covers and what it
+  doesn't ([One-shot actions](#one-shot-actions-and-how-the-tool-behaves-over-time)).
 - **Workloads by selector, or whole tenants?** The example picks pods by label, but the use
   case is containing a compromise "between tenants", and a tenant is usually a namespace.
   I support both: selectors as in the example, and whole namespaces with an explicit
