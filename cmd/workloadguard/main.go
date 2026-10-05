@@ -18,6 +18,7 @@ import (
 
 	"github.com/abbyck/workloadguard/internal/api"
 	"github.com/abbyck/workloadguard/internal/guard"
+	"github.com/abbyck/workloadguard/internal/isolation"
 	"github.com/abbyck/workloadguard/internal/kube"
 )
 
@@ -27,6 +28,7 @@ type config struct {
 	shutdownTimeout time.Duration
 	logLevel        slog.Level
 	protected       string
+	podCIDRs        string
 }
 
 func main() {
@@ -37,6 +39,8 @@ func main() {
 	flag.DurationVar(&cfg.shutdownTimeout, "shutdown-timeout", 20*time.Second, "how long to let in-flight requests finish after SIGTERM")
 	flag.StringVar(&cfg.protected, "protected-namespaces", strings.Join(guard.DefaultProtectedNamespaces, ","),
 		"comma-separated namespaces the tool never touches; its own namespace is always added")
+	flag.StringVar(&cfg.podCIDRs, "pod-cidrs", "10.244.0.0/16",
+		"comma-separated CIDRs covering all pod IPs (kind's default is 10.244.0.0/16); isolation excludes them from its ipBlock rule")
 	flag.TextVar(&cfg.logLevel, "log-level", slog.LevelInfo, "log level: debug, info, warn or error")
 	flag.Parse()
 
@@ -56,12 +60,16 @@ func run(cfg config, log *slog.Logger) error {
 		return fmt.Errorf("create kubernetes client: %w", err)
 	}
 
+	podCIDRs, err := isolation.ParsePodCIDRs(splitList(cfg.podCIDRs))
+	if err != nil {
+		return err
+	}
 	g := guard.New(splitList(cfg.protected), ownNamespace())
 	log.Info("protected namespaces", "namespaces", g.Protected())
 
 	srv := &http.Server{
 		Addr:    cfg.listen,
-		Handler: api.New(log, apiReachable(client), g).Handler(),
+		Handler: api.New(log, apiReachable(client), g, isolation.NewService(client, g, podCIDRs)).Handler(),
 		// Bounded so slow or stuck clients can't hold connections forever. WriteTimeout is
 		// generous because hardening apply waits for rollouts before it responds.
 		ReadHeaderTimeout: 5 * time.Second,

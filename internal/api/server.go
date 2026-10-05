@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/abbyck/workloadguard/internal/guard"
+	"github.com/abbyck/workloadguard/internal/isolation"
 )
 
 // ReadyFunc reports whether the service can do its job, i.e. reach the Kubernetes API.
@@ -19,13 +20,14 @@ const readyTimeout = 2 * time.Second
 
 // Server holds the dependencies shared by all handlers.
 type Server struct {
-	log   *slog.Logger
-	ready ReadyFunc
-	guard *guard.Guard
+	log       *slog.Logger
+	ready     ReadyFunc
+	guard     *guard.Guard
+	isolation *isolation.Service
 }
 
-func New(log *slog.Logger, ready ReadyFunc, g *guard.Guard) *Server {
-	return &Server{log: log, ready: ready, guard: g}
+func New(log *slog.Logger, ready ReadyFunc, g *guard.Guard, iso *isolation.Service) *Server {
+	return &Server{log: log, ready: ready, guard: g, isolation: iso}
 }
 
 // Handler returns the API with all middleware applied.
@@ -33,6 +35,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.HandleFunc("POST /v1/isolations", s.createIsolation)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no route for "+r.Method+" "+r.URL.Path)
 	})

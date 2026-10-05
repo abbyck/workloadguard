@@ -6,8 +6,16 @@
 # once isolation exists (R5.1) they will be checked as blocked while it's on.
 # Everything else (bystander, DNS, external) must always stay reachable.
 #
+# Usage: hack/verify.sh [reachable|blocked]   expected result for A<->B (default reachable)
+#
 # Prints a PASS/FAIL table and exits non-zero if any check doesn't match.
 set -euo pipefail
+
+PEER_WANT=${1:-reachable}
+if [[ $PEER_WANT != reachable && $PEER_WANT != blocked ]]; then
+  echo "usage: $0 [reachable|blocked]" >&2
+  exit 2
+fi
 
 CTX=kind-workloadguard
 TIMEOUT=3
@@ -57,8 +65,8 @@ run_checks() {
   check reachable "B -> external"      http "${B[@]}" http://example.com./
 }
 
-echo "== baseline (no isolation)"
-run_checks reachable
+echo "== A<->B expected $PEER_WANT"
+run_checks "$PEER_WANT"
 
 if ((failures > 0)); then
   echo "$failures check(s) failed"

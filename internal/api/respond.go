@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/abbyck/workloadguard/internal/guard"
+	"github.com/abbyck/workloadguard/internal/isolation"
 )
 
 type errorBody struct {
@@ -41,16 +42,24 @@ type requestError struct {
 
 func (e *requestError) Error() string { return e.msg }
 
-// writeRequestError maps err to a status: requestError to its own 4xx, a protected target
-// to 403, anything else to 500.
+// writeRequestError maps err to a status: bad input to 4xx, a protected target to 403,
+// anything else (Kubernetes API failures, misconfiguration) to 500.
 func writeRequestError(w http.ResponseWriter, err error) {
-	var re *requestError
-	var pe *guard.ProtectedError
+	var (
+		re  *requestError
+		pe  *guard.ProtectedError
+		inv *isolation.InvalidError
+		nf  *isolation.NamespaceNotFoundError
+	)
 	switch {
 	case errors.As(err, &re):
 		writeError(w, re.status, re.code, re.msg)
 	case errors.As(err, &pe):
 		writeError(w, http.StatusForbidden, "protected", pe.Error())
+	case errors.As(err, &inv):
+		writeError(w, http.StatusBadRequest, "invalid_request", inv.Error())
+	case errors.As(err, &nf):
+		writeError(w, http.StatusBadRequest, "namespace_not_found", nf.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 	}

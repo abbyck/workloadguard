@@ -15,7 +15,7 @@ import (
 )
 
 func newTestServer(ready ReadyFunc) *Server {
-	return New(slog.New(slog.NewTextHandler(io.Discard, nil)), ready, guard.New(guard.DefaultProtectedNamespaces, ""))
+	return New(slog.New(slog.NewTextHandler(io.Discard, nil)), ready, guard.New(guard.DefaultProtectedNamespaces, ""), nil)
 }
 
 func ok(context.Context) error { return nil }
