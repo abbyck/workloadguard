@@ -98,8 +98,8 @@ resource defaults, and rollout and shutdown timeouts.
 ### Installing with Helm (optional)
 
 The plain manifests in [deploy/](deploy/) are the primary path. [charts/workloadguard](charts/workloadguard)
-renders the same objects with default values; I checked this by comparing the two renders
-object by object. The one exception is the Namespace: Helm keeps its release record in the
+renders the same objects with default values (verified by comparing the two renders object
+by object). The one exception is the Namespace: Helm keeps its release record in the
 release namespace, so a chart can't create it. Create and label it first, so Pod Security
 Admission `restricted` is still enforced (`--create-namespace` can't add the label):
 
@@ -132,15 +132,15 @@ charts/workloadguard/ optional Helm chart (same objects as deploy/)
 
 ### Libraries
 
-- **[client-go](https://github.com/kubernetes/client-go)**, as the brief recommends, with
-  `k8s.io/api` and `k8s.io/apimachinery`. The typed clientset and its fake cover both
-  features. From apimachinery I used:
+- **[client-go](https://github.com/kubernetes/client-go)**, with `k8s.io/api` and
+  `k8s.io/apimachinery`. The typed clientset and its fake cover both features. From
+  apimachinery:
   - label selectors, to evaluate policies in tests and find pods
   - name and label validation
   - `strategicpatch`, to compute minimal patches
   - `wait`, for rollout polling
 
-  I didn't use controller-runtime or Kubebuilder. The tool is request-driven with no
+  There's no controller-runtime or Kubebuilder. The tool is request-driven with no
   reconcile loop, so a controller framework would add structure without solving anything
   here.
 - **[sigs.k8s.io/yaml](https://github.com/kubernetes-sigs/yaml)**, to accept YAML or JSON
@@ -340,44 +340,40 @@ Errors return a JSON body: `{"error": {"code": "namespace_not_found", "message":
 A CRD with a controller is the production-grade design: requests are declarative and stored in
 the cluster, access is controlled with normal RBAC, they work with GitOps, and status is written
 back to the object. It also costs a lot more: CRD schema, code generation, a reconcile loop and
-its edge cases. For this assignment, an imperative API built on plain client-go fits the time
-budget and keeps the logic easy to follow. All state still lives in the cluster as labeled
+its edge cases. For a tool of this size, an imperative API on plain client-go is far less code
+and keeps the logic easy to follow. All state still lives in the cluster as labeled
 objects, so moving to a CRD later would mostly mean replacing the HTTP layer.
 
 The API has no authentication, so a NetworkPolicy in the tool's namespace blocks all
-ingress: no pod can call it. Before I added it, any pod in the cluster could reach the
-Service and get the tool to patch workloads it had no rights to; I checked that on kind.
+ingress: no pod can call it. Without it, any pod in the cluster could reach the Service and
+get the tool to patch workloads it has no rights to (verified on kind).
 `kubectl port-forward` still works, because it connects inside the pod's network namespace,
 and it already requires cluster access. In production the API would need authentication
 and authorization, or the CRD approach above.
 
 ## Decisions
 
-The brief leaves these open:
+Design decisions, and where each is explained:
 
-| Decision | Where |
+| Question | Answer |
 |---|---|
+| How operators trigger actions and see what the tool did or would do | [API](#api), [Why an HTTP API](#why-an-http-api-and-not-a-crd), [Seeing what would change](#seeing-what-would-change) |
+| One-shot actions or continuous enforcement | [One-shot actions](#one-shot-actions-and-how-the-tool-behaves-over-time) |
 | How isolation behaves as pods come and go | [Pods coming and going](#pods-coming-and-going) |
+| How "everything except B" is expressed with allow-only NetworkPolicies | [How isolation works](#how-isolation-works) |
+| What happens when NetworkPolicies already exist | [Existing NetworkPolicies](#existing-networkpolicies-are-refused-not-merged) |
+| Where state lives, and what retries and restarts do | [State and retries](#state-and-retries) |
 | What counts as a hardened securityContext | [Two levels](#what-hardened-means-two-levels) |
 | Set default requests/limits or only report them, and which defaults | [Resource defaults](#resource-defaults-set-them-conservatively) |
-| Which workload types the tool handles | [Which workloads are handled](#which-workloads-are-handled) |
-| How operators trigger actions and see what the tool did or would do | [API](#api), [Why an HTTP API](#why-an-http-api-and-not-a-crd), [Seeing what would change](#seeing-what-would-change) |
-| Which namespaces or workloads the tool never touches | [Never-touch list](#never-touch-list) |
-
-My own decisions beyond those:
-
-- [One-shot actions, and how the tool behaves over time](#one-shot-actions-and-how-the-tool-behaves-over-time)
-- [How the policies express "everything except B"](#how-isolation-works)
-- [Refusing to combine with existing NetworkPolicies](#existing-networkpolicies-are-refused-not-merged)
-- [Keeping state in the cluster](#state-and-retries)
-- [Running the tool](#running-the-tool): one replica, RBAC
+| Which workload types are handled | [Which workloads are handled](#which-workloads-are-handled) |
+| Which namespaces or workloads are never touched | [Never-touch list](#never-touch-list) |
+| How the tool itself runs: replicas, RBAC, self-hardening | [Running the tool](#running-the-tool) |
 
 ### One-shot actions, and how the tool behaves over time
 
-The brief asks to "think about how it behaves over time and when things aren't healthy".
-Both tasks are "on demand", so I built one-shot actions, not a controller that keeps
-reconciling. I read "over time" as being about the service's lifecycle: what happens
-between requests, and while the tool itself is restarting or the cluster is unhealthy.
+Both features act on demand: one request, one change. There's no controller that keeps
+reconciling. This table shows how the tool behaves between requests, while it restarts,
+and when the cluster is unhealthy:
 
 | Over time… | What happens |
 |---|---|
@@ -393,7 +389,7 @@ The last two rows are the trade-off. The next step would be a background drift c
 re-runs the request-time checks against every active isolation, and exposes what it finds
 as a metric and in `GET` warnings for alerting. It wouldn't repair anything on its own: if
 a person deleted a policy, putting it back silently would fight them. The long-term answer
-is a controller (see [what I'd do with more time](#what-id-do-with-more-time)), and
+is a controller (see [Future work](#future-work)), and
 admission policies for hardening, so new workloads can't arrive unhardened.
 
 ### Isolation
@@ -412,7 +408,7 @@ them deny-by-default, and then allows everything except the other side:
 3. An `ipBlock` for everything that isn't a pod: external addresses, nodes (kubelet probes)
    and host-network pods. **It excludes the pod CIDRs.** kindnet, like most CNIs, matches
    `ipBlock` against pod IPs as well. With a bare `0.0.0.0/0`, the peer gets straight back in.
-   I checked this on kind: removing the exclusion reopened A↔B.
+   Verified on kind: removing the exclusion reopens A↔B.
 
 For a whole-namespace side (`allPods`), the policy selects every pod in the namespace, and
 as a peer it has no labels to negate, so there's no rule 2: no pod in its namespace is
@@ -430,8 +426,8 @@ A node added later with a new range is caught instead of silently leaking.
 
 Policies select pods by label, not by name or IP. New replicas, restarts, rescheduled
 pods and scale-ups are covered as soon as they start. Nothing has to watch for them.
-I checked this on kind by restarting the gateway (all pods replaced, new IPs) and
-scaling the dashboard up while isolated; the new pods were blocked straight away.
+Verified on kind by restarting the gateway (all pods replaced, new IPs) and scaling the
+dashboard up while isolated: the new pods are blocked straight away.
 
 What follows from this:
 
@@ -510,7 +506,7 @@ the request with the sides in a fixed order:
   `sigs.k8s.io/json`: Go's `encoding/json` alone would have accepted `allpods` as
   `allPods`, because it matches field names case-insensitively.
 
-Selectors are exact label matches only (`matchLabels`), as in the brief's example.
+Selectors are exact label matches only (`matchLabels`), as in the example request.
 Supporting `matchExpressions` would mean negating arbitrary expressions, which is where
 bugs come from.
 
@@ -550,8 +546,8 @@ of the image to apply safely.
 | pod `runAsNonRoot: true` | | ✓ |
 | `readOnlyRootFilesystem: true` | | ✓ |
 
-**Why dropping all capabilities isn't in baseline.** I tested it on kind. Images that start
-as root and then switch user crash without capabilities:
+**Why dropping all capabilities isn't in baseline.** Images that start as root and then
+switch user crash without capabilities (tested on kind):
 
 - `nginx:1.27-alpine` fails with
   `chown(... /var/cache/nginx/client_temp, 101) failed (Operation not permitted)`.
@@ -668,11 +664,11 @@ every field has drifted, only the annotations are removed, which restarts nothin
 Undo goes through the same path as apply: a strategic merge patch with the
 `resourceVersion`, conflict retries, per-workload results and rollout status.
 
-I checked it on kind: hardening `legacy` and then undoing it left both pod templates
+Verified on kind: hardening `legacy` and then undoing it leaves both pod templates
 identical to the originals.
 
-**GitOps and drift.** I checked on kind what re-applying the original manifest does to the
-fields hardening added. With `kubectl apply` (client-side, Argo CD's default) and with
+**GitOps and drift.** What re-applying the original manifest does to the fields hardening
+added, tested on kind: with `kubectl apply` (client-side, Argo CD's default) and with
 server-side apply (how Flux applies), they **stay**: both only manage the fields in the
 manifest. With `kubectl replace`, or a sync that deletes and recreates, they're lost. So
 GitOps usually doesn't undo hardening, but the cluster silently drifts from Git: the
@@ -704,9 +700,8 @@ apart.
 - **One replica.** Actions are request-driven and all state lives in the cluster as labeled
   objects, so there's nothing to share between replicas or recover after a restart. A
   replacement pod picks up exactly where the last one stopped. On SIGTERM the pod finishes
-  in-flight requests (up to `--shutdown-timeout`, 20s) before exiting. I checked this by
-  deleting the pod 3 seconds into a hardening apply: the request still returned a complete
-  `200`. An apply that waits longer than the shutdown timeout for rollouts loses its report,
+  in-flight requests (up to `--shutdown-timeout`, 20s) before exiting. Verified by deleting
+  the pod 3 seconds into a hardening apply: the request still returns a complete `200`. An apply that waits longer than the shutdown timeout for rollouts loses its report,
   but each workload's patch is atomic, so the cluster stays consistent; re-running the
   request reports them as unchanged.
 - **The tool passes its own checks.** Its pod runs as non-root with a read-only root
@@ -761,9 +756,10 @@ admission, honor `DryRun`, or check `resourceVersion` on patches. So:
 - The tests intercept dry-run patches themselves.
 - The `resourceVersion` conflict was checked against kind by hand.
 
-### The tricky cases, and why I chose them
+### Tricky cases
 
-Each of these has a comment in the test explaining it.
+These are the cases that are easiest to get wrong, and why. Each test has a comment
+explaining it.
 
 1. **Negating a multi-label selector** (`TestPeersAllowEverythingExceptB`, in
    `internal/isolation/policy_test.go`). "Everything except B" for B =
@@ -773,14 +769,14 @@ Each of these has a comment in the test explaining it.
    `{app: dashboard, tier: backend}`.
 
    The test evaluates the generated rules with real label-selector matching against nine
-   pods, instead of comparing structs. I checked that it catches the bug by introducing the
-   bug on purpose: three cases fail.
+   pods, instead of comparing structs. Introducing that bug on purpose makes three cases
+   fail.
 2. **The `ipBlock` must exclude pod CIDRs** (`TestIPBlockExceptsPodCIDRs`). The obvious
    "allow `0.0.0.0/0` for external traffic" silently lets the isolated peer back in, because
    kindnet matches `ipBlock` against pod IPs. This one was found and proved on kind:
    removing the exclusion reopened A↔B. The unit test keeps it from regressing.
-3. **Turning off deletes only what it created** (`TestOffRemovesOnlyItsOwnPolicies`). The
-   brief stresses restoring previous connectivity. A broader delete, such as every
+3. **Turning off deletes only what it created** (`TestOffRemovesOnlyItsOwnPolicies`). Turning
+   isolation off has to restore the previous connectivity exactly. A broader delete, such as every
    workloadguard policy in the namespace or every policy selecting the pods, would remove
    another team's policy or another isolation, and so change connectivity the request
    didn't own.
@@ -794,12 +790,12 @@ Each of these has a comment in the test explaining it.
    `allowPrivilegeEscalation: true`, `runAsUser`, added capabilities. Only the gaps are
    filled. The memory limit is raised to the request when the default would be lower, and
    `runAsNonRoot` is skipped when something explicitly runs as root. Getting this wrong
-   breaks the workload, which the brief names as the thing to avoid.
+   breaks the workload, which hardening must never do.
 6. **Existing isolation IDs survive changes to the request format**
    (`TestIDOfExistingRequestsIsStable`). The ID is a hash of the request's JSON, and it's
    how isolations are found again. Adding the `allPods` field could easily have changed
    every existing ID, leaving isolations already in a cluster impossible to list or turn
-   off through the API. The test pins the brief's example to the ID it had before.
+   off through the API. The test pins the example request to the ID it had before.
 
 ### Integration tests
 
@@ -898,7 +894,7 @@ connectivity checks alone.
 - **The end-to-end CI job builds a whole kind cluster** on every push, which takes a few
   minutes. A larger project would run it less often, for example on pull requests only.
 
-### What I'd do with more time
+### Future work
 
 1. **CRDs and a controller** instead of the HTTP API (`Isolation` and `HardeningPolicy`
    resources). Requests become declarative and RBAC-controlled. The controller can
@@ -918,39 +914,6 @@ connectivity checks alone.
 6. **Apply exactly the plan that was reviewed.** Today apply works the plan out again from
    the live objects, so if a workload changed between the dry run and the apply, the
    result can differ from what the operator saw; the response reports it, but doesn't stop
-   it. The brief's "see what would change before it changes" could fairly be read as a
-   promise that what you saw is what you get. The fix is a `terraform plan -out` style
+   it. A dry run is most useful as a promise: what you saw is what you get. The fix is a `terraform plan -out` style
    flow: the plan returns an ID tied to each workload's `resourceVersion`, apply takes that
    ID, and it refuses any workload that changed since, asking for a new plan instead.
-
-## Feedback on the brief
-
-- **"Prevent ... from exchanging any network traffic"** is stronger than NetworkPolicy can
-  promise. Host-network pods, NodePort or LoadBalancer paths with source rewriting, relays
-  and already-open connections all fall outside it. I took it as direct pod-to-pod traffic
-  at L3/L4 and listed the rest under limitations. It might help to say which of these the
-  brief expects to be handled.
-- **"Restore the workloads' previous connectivity"** is ambiguous when other things change
-  during isolation, such as new policies or relabelled pods. I took it as "remove exactly
-  what the tool added, and refuse to start if that wouldn't restore the old state".
-- **Existing NetworkPolicies aren't mentioned**, but they're the biggest trap. Because
-  policies combine with OR, the obvious implementation widens access for any target that
-  already has a policy. Calling this out, or leaving it as a deliberate hidden test, are
-  both fair. It decides whether a solution is safe.
-- **"Namespace(s)" in the isolation story vs one namespace per side in the example.** I
-  supported one namespace per side and would ask which was meant.
-- **"Think about how it behaves over time": one-shot or continuous?** Both tasks say "on
-  demand", which suggests one-shot actions, but "over time" could also mean the tool should
-  keep enforcing: noticing a deleted policy or a new one that reopens traffic. I built
-  one-shot actions on cluster-native state, and explained what that covers and what it
-  doesn't ([One-shot actions](#one-shot-actions-and-how-the-tool-behaves-over-time)).
-- **Workloads by selector, or whole tenants?** The example picks pods by label, but the use
-  case is containing a compromise "between tenants", and a tenant is usually a namespace.
-  I support both: selectors as in the example, and whole namespaces with an explicit
-  `allPods: true`.
-- **"Running without resource requests and limits"** reads as if both should always be set.
-  I deliberately set no CPU limit (see Resource defaults); a hint that this is open would
-  help.
-- **The 4–6 hour estimate** fits the core logic. With the deployment manifests and RBAC, a
-  runnable verification, tests that can be explained line by line, and the README, it's
-  tight. The open trigger mechanism also adds design time.
