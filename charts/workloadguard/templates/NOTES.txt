@@ -1,0 +1,4 @@
+workloadguard is running in {{ .Release.Namespace }}. Reach the API with:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "workloadguard.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -sS localhost:8080/v1/isolations

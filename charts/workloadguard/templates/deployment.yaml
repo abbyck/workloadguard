@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "workloadguard.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "workloadguard.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "workloadguard.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "workloadguard.fullname" . }}
+    spec:
+      serviceAccountName: {{ include "workloadguard.fullname" . }}
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: workloadguard
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --listen=:8080
+            - --shutdown-timeout={{ .Values.shutdownTimeout }}
+            - --pod-cidrs={{ join "," .Values.podCIDRs }}
+            - --protected-namespaces={{ join "," .Values.protectedNamespaces }}
+            - --default-cpu-request={{ .Values.hardening.defaultCPURequest }}
+            - --default-memory-request={{ .Values.hardening.defaultMemoryRequest }}
+            - --default-memory-limit={{ .Values.hardening.defaultMemoryLimit }}
+            - --rollout-timeout={{ .Values.hardening.rolloutTimeout }}
+            - --log-level={{ .Values.logLevel }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

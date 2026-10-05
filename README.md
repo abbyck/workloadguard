@@ -68,6 +68,24 @@ go run ./cmd/workloadguard --context kind-workloadguard
 Run `go run ./cmd/workloadguard -h` for all flags: protected namespaces, pod CIDRs,
 resource defaults, and rollout and shutdown timeouts.
 
+### Installing with Helm (optional)
+
+The plain manifests in [deploy/](deploy/) are the primary path. [charts/workloadguard](charts/workloadguard)
+renders the same objects with default values; I checked this by comparing the two renders
+object by object. The one exception is the Namespace: Helm keeps its release record in the
+release namespace, so a chart can't create it. Create and label it first, so Pod Security
+Admission `restricted` is still enforced (`--create-namespace` can't add the label):
+
+```sh
+kubectl create namespace workloadguard
+kubectl label namespace workloadguard pod-security.kubernetes.io/enforce=restricted
+helm install workloadguard charts/workloadguard -n workloadguard
+```
+
+Values cover the image, protected namespaces, pod CIDRs, hardening defaults and rollout
+timeout, shutdown timeout, log level and resources. Replicas aren't a value; the tool runs
+one on purpose. `hack/verify.sh` passes against a Helm install too.
+
 ### Repository layout
 
 ```
@@ -80,6 +98,7 @@ internal/kube/        client setup (in-cluster or kubeconfig)
 deploy/               the tool's own manifests (namespace, RBAC, deployment, service)
 examples/             sample workloads and example requests
 hack/                 kind config, cluster setup, NetworkPolicy check, verify.sh
+charts/workloadguard/ optional Helm chart (same objects as deploy/)
 ```
 
 ### Libraries
@@ -772,7 +791,6 @@ alone.
    created instead of patched afterwards.
 4. Refuse isolation for host-network pods, and emit Kubernetes Events for every action.
 5. Run the integration tests and `verify.sh` in CI, with a kind cluster per run.
-6. The remaining bonus items.
 
 ## Time taken
 

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "workloadguard.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "workloadguard.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: {{ include "workloadguard.fullname" . }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

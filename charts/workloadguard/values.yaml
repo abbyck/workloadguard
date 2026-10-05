@@ -1,0 +1,49 @@
+# The plain manifests in deploy/ are the primary install path. With default values this
+# chart renders the same objects, except the Namespace: Helm keeps its release record in
+# the release namespace, so a chart can't create it. Create and label it first:
+#
+#   kubectl create namespace workloadguard
+#   kubectl label namespace workloadguard pod-security.kubernetes.io/enforce=restricted
+#   helm install workloadguard charts/workloadguard -n workloadguard
+
+image:
+  repository: workloadguard
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Namespaces the tool never touches. Replaces the built-in list; the release namespace is
+# always added by the tool itself.
+protectedNamespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+  - local-path-storage
+
+# CIDRs covering every pod IP. kind's default is 10.244.0.0/16. Isolation refuses to run if
+# a node's pod range falls outside these.
+podCIDRs:
+  - 10.244.0.0/16
+
+# Resource values hardening fills in where a container has none. No CPU limit is ever set.
+hardening:
+  defaultCPURequest: 50m
+  defaultMemoryRequest: 64Mi
+  defaultMemoryLimit: 256Mi
+  rolloutTimeout: 90s
+
+shutdownTimeout: 20s
+logLevel: info
+
+# Always one replica: actions are request-driven and all state lives in the cluster (see
+# the README), so there's nothing to gain from more. Not configurable on purpose.
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+service:
+  port: 80

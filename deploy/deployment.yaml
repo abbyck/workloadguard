@@ -30,11 +30,17 @@ spec:
         - name: workloadguard
           image: workloadguard:0.1.0
           imagePullPolicy: IfNotPresent
+          # Every flag spelled out, so the configuration is visible here.
           args:
             - --listen=:8080
             - --shutdown-timeout=20s
             - --pod-cidrs=10.244.0.0/16
+            - --protected-namespaces=kube-system,kube-public,kube-node-lease,local-path-storage
+            - --default-cpu-request=50m
+            - --default-memory-request=64Mi
+            - --default-memory-limit=256Mi
             - --rollout-timeout=90s
+            - --log-level=info
           env:
             # The tool's own namespace is always protected.
             - name: POD_NAMESPACE
