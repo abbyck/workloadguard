@@ -33,11 +33,13 @@ That runs four steps:
    workers, pinned node image). `hack/netpol-check.sh` proves its CNI enforces NetworkPolicy.
 2. `make samples` deploys the sample workloads in [examples/](examples/):
    - `tenant-a/gateway` and `tenant-b/dashboard` to isolate
+   - `tenant-b/reports`, the dashboard's neighbour: reachable while only the dashboard is
+     isolated, cut off when all of `tenant-b` is
    - `shared/bystander`, which must keep working
    - `legacy/unhardened` and `legacy/partial` to harden
 3. `make deploy` builds the image, loads it into kind and deploys [deploy/](deploy/).
-4. `make verify` runs [hack/verify.sh](hack/verify.sh): baseline, isolate, check blocking,
-   restart pods, un-isolate, check restored.
+4. `make verify` runs [hack/verify.sh](hack/verify.sh): baseline, isolate two workloads,
+   check blocking, restart pods, un-isolate, then the same for two whole namespaces.
 
 Every target uses the `kind-workloadguard` context explicitly, never your current one.
 `make help` lists the targets, and `make clean` deletes the cluster.
@@ -53,6 +55,11 @@ curl -sS -X POST localhost:8080/v1/isolations \
 curl -sS localhost:8080/v1/isolations
 hack/verify.sh blocked
 curl -sS -X DELETE localhost:8080/v1/isolations/<id>
+
+# or cut off two whole namespaces (tenants)
+curl -sS -X POST localhost:8080/v1/isolations \
+  -H 'Content-Type: application/yaml' --data-binary @examples/requests/isolate-namespaces.yaml
+hack/verify.sh namespaces
 
 # see what hardening would change, then apply it
 curl -sS -X POST localhost:8080/v1/hardening/plan \
@@ -188,6 +195,17 @@ isolate:
   b: {namespace: tenant-b, selector: {app: dashboard}}
 ```
 
+Or, to cut off whole namespaces, for example a compromised tenant
+([examples/requests/isolate-namespaces.yaml](examples/requests/isolate-namespaces.yaml)):
+
+```yaml
+isolate:
+  a: {namespace: tenant-a, allPods: true}
+  b: {namespace: tenant-b, allPods: true}
+```
+
+The two forms can be mixed: one side a whole namespace, the other a selector.
+
 Response:
 
 ```json
@@ -211,6 +229,9 @@ Response:
 - **Selectors are exact label matches** (`matchLabels`). `matchExpressions` aren't supported,
   because the tool has to build "everything except these pods", and negating arbitrary
   expressions gets error-prone fast.
+- **A whole namespace has to be asked for with `allPods: true`.** An empty selector is
+  rejected, because it's far more often a mistake than a request to isolate everything;
+  the error says to use `allPods` instead. Giving both is rejected as ambiguous.
 - **`DELETE` is safe to repeat.** It removes only the objects labeled with that ID and returns
   what it deleted. If they're already gone it returns `200` with an empty list.
 - **Existing NetworkPolicies on the targets block the request** with `409` and a list of those
@@ -368,6 +389,10 @@ them deny-by-default, and then allows everything except the other side:
    `ipBlock` against pod IPs as well. With a bare `0.0.0.0/0`, the peer gets straight back in.
    I checked this on kind: removing the exclusion reopened A↔B.
 
+For a whole-namespace side (`allPods`), the policy selects every pod in the namespace, and
+as a peer it has no labels to negate, so there's no rule 2: no pod in its namespace is
+allowed.
+
 Either policy alone blocks A↔B. Having both means one deleted or broken policy doesn't
 reopen the connection.
 
@@ -397,6 +422,8 @@ What follows from this:
 
 If any NetworkPolicy already selects either side's pods, the request fails with `409` and
 lists those policies. This includes a namespace-wide default deny (empty `podSelector`).
+For a whole-namespace side, *every* NetworkPolicy in that namespace counts, even one whose
+pods aren't running: each would combine with the isolation, now or once its pods start.
 
 NetworkPolicies combine with OR. Say the dashboard only accepts traffic from one client
 ([examples/extras/preexisting-netpol.yaml](examples/extras/preexisting-netpol.yaml)).
@@ -443,7 +470,8 @@ the request with the sides in a fixed order:
 
 #### Which requests are rejected
 
-- **Empty selectors.** They would select every pod in the namespace.
+- **Empty selectors.** They would select every pod in the namespace; that has to be asked
+  for explicitly with `allPods: true`.
 - **Selectors that could match the same pod, in the same namespace.** `{app: gateway}` and
   `{tier: edge}` are rejected even if no pod carries both labels yet, because one could
   later, and a pod can't be isolated from itself. They count as separate only when some
@@ -451,8 +479,11 @@ the request with the sides in a fixed order:
 - **Protected targets**, with `403`. These are system namespaces, the tool's own namespace,
   and anything labeled `workloadguard.io/ignore=true`, including the pods the selector
   currently matches.
-- **Unknown fields**, such as `selecter:`. A typo shouldn't silently turn into an empty
-  selector.
+- **Unknown fields, duplicate keys and wrong-case names**, such as `selecter:` or
+  `allpods:`. A typo shouldn't silently turn into an empty selector. Request bodies are
+  decoded as strictly as the Kubernetes API server decodes objects, with
+  `sigs.k8s.io/json`: Go's `encoding/json` alone would have accepted `allpods` as
+  `allPods`, because it matches field names case-insensitively.
 
 Selectors are exact label matches only (`matchLabels`), as in the brief's example.
 Supporting `matchExpressions` would mean negating arbitrary expressions, which is where
@@ -739,6 +770,11 @@ Each of these has a comment in the test explaining it.
    filled. The memory limit is raised to the request when the default would be lower, and
    `runAsNonRoot` is skipped when something explicitly runs as root. Getting this wrong
    breaks the workload, which the brief names as the thing to avoid.
+6. **Existing isolation IDs survive changes to the request format**
+   (`TestIDOfExistingRequestsIsStable`). The ID is a hash of the request's JSON, and it's
+   how isolations are found again. Adding the `allPods` field could easily have changed
+   every existing ID, leaving isolations already in a cluster impossible to list or turn
+   off through the API. The test pins the brief's example to the ID it had before.
 
 ### Integration tests
 
@@ -747,7 +783,8 @@ namespaces they delete afterwards. They cover what the fake clientset can't:
 
 - **Isolation:** real server-side apply. The stored policy matches what was built and is
   owned by the `workloadguard` field manager. Re-applying is a no-op, a stacked isolation
-  conflicts, and off removes everything.
+  conflicts, and off removes everything. Whole namespaces store an empty `podSelector` and
+  no rule admitting the peer namespace.
 - **Hardening:**
   - plan sends a real server-side dry run, which validates and stores nothing
     (`generation` unchanged)
@@ -765,15 +802,19 @@ on a fresh kind cluster for every push.
 It runs against the deployed tool, through its own port-forward:
 
 1. Baseline: every path is reachable.
-2. Isolate through the API. A↔B is blocked, while bystander↔A, bystander↔B, DNS and
-   external egress still work.
+2. Isolate the gateway and the dashboard through the API. A↔B is blocked, while
+   bystander↔A, bystander↔B, DNS and external egress still work. So does A↔`reports`, the
+   dashboard's neighbour in `tenant-b`: only the selected pods are cut off.
 3. Restart the gateway pods. The new pods are blocked too.
 4. Un-isolate. Every path is reachable again.
+5. Isolate all of `tenant-a` from all of `tenant-b` (`allPods`). Now A↔`reports` is blocked
+   too, while traffic inside `tenant-b` (dashboard → reports) still works.
+6. Un-isolate. Every path is reachable again.
 
 It prints a PASS/FAIL table and exits non-zero on any mismatch. If it's interrupted while
 isolated, it turns isolation off before exiting, falling back to `kubectl` if Ctrl-C also
-killed the port-forward. `hack/verify.sh reachable|blocked` runs the connectivity checks
-alone.
+killed the port-forward. `hack/verify.sh reachable|blocked|namespaces` runs the
+connectivity checks alone.
 
 ## Known limitations
 
@@ -866,6 +907,10 @@ alone.
   both fair. It decides whether a solution is safe.
 - **"Namespace(s)" in the isolation story vs one namespace per side in the example.** I
   supported one namespace per side and would ask which was meant.
+- **Workloads by selector, or whole tenants?** The example picks pods by label, but the use
+  case is containing a compromise "between tenants", and a tenant is usually a namespace.
+  I support both: selectors as in the example, and whole namespaces with an explicit
+  `allPods: true`.
 - **"Running without resource requests and limits"** reads as if both should always be set.
   I deliberately set no CPU limit (see Resource defaults); a hint that this is open would
   help.
