@@ -104,11 +104,12 @@ namespaces: [legacy]
 level: baseline   # or strict
 ```
 
-Plan response:
+Plan response (trimmed; this is the real output for the sample `legacy` namespace):
 
 ```json
 {
   "level": "baseline",
+  "dryRun": true,
   "workloads": [
     {
       "kind": "Deployment", "namespace": "legacy", "name": "unhardened",
@@ -116,20 +117,33 @@ Plan response:
       "changes": [
         {"container": "", "field": "securityContext.seccompProfile.type", "before": null, "after": "RuntimeDefault"},
         {"container": "web", "field": "securityContext.allowPrivilegeEscalation", "before": null, "after": false},
-        {"container": "web", "field": "resources.requests.memory", "before": null, "after": "64Mi"}
+        {"container": "web", "field": "resources.requests.cpu", "before": null, "after": "50m"},
+        {"container": "web", "field": "resources.requests.memory", "before": null, "after": "64Mi"},
+        {"container": "web", "field": "resources.limits.memory", "before": null, "after": "256Mi"}
       ]
     }
   ],
-  "skipped": [
-    {"kind": "Pod", "namespace": "legacy", "name": "debug", "reason": "bare Pod: reported, not patched"}
-  ]
+  "skipped": [],
+  "unchanged": [],
+  "notes": []
 }
 ```
 
-`container: ""` means a pod-level field. The apply response is the same plan with a `result` on
-each workload: `patched`, `unchanged` or `failed` (with an `error`), plus its rollout status
-(`ready`, or not ready within the timeout). Apply works out the plan again when it runs, so it
-reports what it actually changed, even if the cluster changed since the dry run.
+- `container: ""` is a pod-level field. `before` is always `null`, because the tool only fills
+  unset fields.
+- `skipped` lists workloads it won't patch, with the reason: bare Pods, Jobs, CronJobs, or
+  anything labeled `workloadguard.io/ignore=true`.
+- `unchanged` lists workloads that already meet the level.
+- `notes` on a workload say what was deliberately left alone, or what the level might break.
+
+The apply response is the same structure with `dryRun: false`, and each workload gets:
+
+- `result`: `patched` or `failed`, with an `error`. A failure doesn't stop the other workloads.
+- `rollout`: `ready`, or what went wrong, for example
+  `rolled out, but pods are failing: pod unhardened-54bf… container web: Error (exit 1)`.
+
+Apply works the plan out again from the live objects. It reports what it actually changed,
+even if something changed since the dry run.
 
 ### Errors
 
@@ -264,3 +278,144 @@ the request with the sides in a fixed order:
 Selectors are exact label matches only (`matchLabels`), as in the brief's example.
 Supporting `matchExpressions` would mean negating arbitrary expressions, which is where
 bugs come from.
+
+### Hardening
+
+#### Which workloads are handled
+
+| Kind | What happens | Why |
+|---|---|---|
+| Deployment, StatefulSet, DaemonSet | **Patched** (pod template) | Their controllers roll the change out to new pods. |
+| Pod with an owner (ReplicaSet etc.) | Ignored | Its controller is patched instead; editing the pod would be reverted. |
+| Bare Pod (no owner) | **Reported**, not patched | Most securityContext fields can't change on a running pod, and nothing would recreate it. |
+| Job | **Reported**, not patched | A Job's pod template can't be changed. |
+| CronJob | **Reported**, not patched | It could be patched, but it's out of scope here; fix its manifest. |
+| Anything labeled `workloadguard.io/ignore=true` | Skipped, with the reason | Owner opted out. |
+| Workloads in protected namespaces | Request refused (`403`) | System namespaces and the tool's own. |
+
+Init containers are hardened along with regular containers. Ephemeral (debug) containers
+aren't.
+
+#### What "hardened" means: two levels
+
+One rule decides which level a field belongs to. **Baseline** only holds fields that don't
+change what a normal process can do at startup. **Strict** holds fields that need knowledge
+of the image to apply safely.
+
+| Field | Baseline | Strict |
+|---|---|---|
+| pod `seccompProfile: RuntimeDefault` | ✓ | ✓ |
+| `allowPrivilegeEscalation: false` | ✓ | ✓ |
+| `capabilities.drop: [ALL]` (explicit `add` entries are kept) | | ✓ |
+| pod `runAsNonRoot: true` | | ✓ |
+| `readOnlyRootFilesystem: true` | | ✓ |
+
+**Why dropping all capabilities isn't in baseline.** I tested it on kind. Images that start
+as root and then switch user crash without capabilities:
+
+- `nginx:1.27-alpine` fails with
+  `chown(... /var/cache/nginx/client_temp, 101) failed (Operation not permitted)`.
+- `redis:7.4-alpine` fails with `setpriv: setresuid failed`.
+
+Both run again with `CHOWN, SETUID, SETGID` (nginx) or `SETUID, SETGID` (redis) added back.
+The tool can't see an image's user through the Kubernetes API. Server-side dry run doesn't
+catch it either, because the patch is valid and the failure only shows when the container
+starts. So it's opt-in.
+
+The trade-off is that baseline does not meet Pod Security Standards **restricted**. Strict
+gets close.
+
+What strict does to the samples, also tested on kind:
+
+- `legacy/unhardened` (nginx-unprivileged) crash-loops on the read-only root filesystem.
+- `legacy/partial`'s busybox init container is refused by the kubelet with
+  `CreateContainerConfigError`, because it runs as root and `runAsNonRoot` is set.
+
+The apply response reports both.
+
+**The tool never loosens or overrides an explicit value.** It only fills unset fields:
+
+- An explicit `allowPrivilegeEscalation: true` stays.
+- `runAsNonRoot` isn't set if the pod or any container explicitly has `runAsUser: 0`. That
+  combination makes the kubelet refuse to start the container. The tool adds a note instead.
+- **Privileged containers** keep their securityContext unchanged and get a note. They're
+  usually privileged for a reason (CNI agents, storage drivers), and the API rejects
+  `allowPrivilegeEscalation: false` together with `privileged: true`.
+- Containers that add `SYS_ADMIN` keep `allowPrivilegeEscalation` unset, for the same API
+  reason.
+
+#### Resource defaults: set them, conservatively
+
+The tool **sets** missing values instead of only reporting them. A container with no requests
+is scheduled as if it costs nothing, and one with no memory limit can take memory from
+everything else on its node. Both are configurable by flag.
+
+| Field | Default | Note |
+|---|---|---|
+| `requests.cpu` | `50m` | Not set if the container has a CPU limit |
+| `requests.memory` | `64Mi` | Not set if the container has a memory limit |
+| `limits.memory` | `256Mi` | Raised to the request if the request is higher; the API rejects a limit below it |
+| `limits.cpu` | **never set** | |
+
+- **No CPU limit.** CPU limits throttle a container even when the node has CPU to spare,
+  which causes latency for no gain. A memory limit protects the node; a CPU limit mostly
+  hurts the workload.
+- **A limit without a request is left alone.** The API server sets the request equal to the
+  limit at admission. Filling in the small default would lower it and change the pod's QoS
+  class from Guaranteed to Burstable.
+- **Namespaces with a LimitRange that sets container defaults** keep resources untouched.
+  The LimitRange already applies them at admission, and it's the namespace owner's call.
+  The plan says so in `notes`.
+
+#### Seeing what would change
+
+`POST /v1/hardening/plan` returns every change per workload and container, with the field,
+old value and new value, and whether it restarts pods. It changes nothing.
+
+Each patch is also sent as a **server-side dry run**, so API validation, admission webhooks
+and Pod Security Admission get their say before anything changes. Plan and apply share the
+same code: apply is the plan without the dry-run flag.
+
+#### Applying without breaking things
+
+- **Strategic merge patch** carrying only the added fields. Containers are merged by name,
+  so a concurrent change to an image or another field isn't overwritten.
+- The patch includes the object's **`resourceVersion`**. If the workload changed since it
+  was read, the API server rejects the patch with a conflict (checked on kind). The tool
+  then reads it again, recomputes and retries. A stale value is never written.
+- **A failure on one workload doesn't stop the others.** Each workload gets its own result.
+- **Re-applying is a no-op.** Nothing is patched and no pods restart.
+- **Rollout status is reported.** Changing the pod template restarts the pods (the plan
+  says `restartsPods: true`). Apply waits up to `--rollout-timeout` (default 90s) for each
+  rollout, then:
+  - watches the pods for another 10 seconds, and
+  - reports any container that is crash-looping, refused by the kubelet, or has restarted.
+
+The 10-second settle check comes from running strict on kind. `unhardened` has no readiness
+probe, so Kubernetes counted the new pod as available the moment its container started. The
+rollout "completed", and the old pod was removed before nginx crashed a second later.
+Without the settle check, the tool reported that as `ready`.
+
+The tool reports a failed rollout. It doesn't roll it back. For Deployments, the old pods
+keep serving whenever the new ones never become available, as happened with `partial`.
+
+#### Undo (designed, not built)
+
+Every patched workload records what was changed, in annotations:
+
+- `workloadguard.io/hardening-changes`: a JSON list of `{container, field, before, after}`.
+  Later runs add to it, for example baseline and then strict.
+- `workloadguard.io/hardened-at` and `workloadguard.io/hardening-level`.
+
+An undo endpoint, `POST /v1/hardening/undo` with the same body, would:
+
+1. Read the annotation, and for each change check that the field **still holds the value the
+   tool set**. If someone has changed it since, leave it and report it. Undo must not revert
+   someone else's later edit.
+2. Build a patch that removes the remaining fields. `before` is always `null`, so undo means
+   deleting the field. Send it with the `resourceVersion`, like apply.
+3. Remove the annotations, and offer the same plan/apply split as hardening.
+
+One caveat: if the workload is managed by GitOps (Argo CD, Flux), the controller reverts the
+patch on its next sync anyway. Hardening and undo there are only a stopgap; the real fix
+belongs in the source manifests.
