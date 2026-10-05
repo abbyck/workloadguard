@@ -9,6 +9,8 @@ import (
 	"net/http"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/abbyck/workloadguard/internal/guard"
 )
 
 type errorBody struct {
@@ -39,14 +41,19 @@ type requestError struct {
 
 func (e *requestError) Error() string { return e.msg }
 
-// writeRequestError writes err as a 4xx if it is a requestError, otherwise as a 500.
+// writeRequestError maps err to a status: requestError to its own 4xx, a protected target
+// to 403, anything else to 500.
 func writeRequestError(w http.ResponseWriter, err error) {
 	var re *requestError
-	if errors.As(err, &re) {
+	var pe *guard.ProtectedError
+	switch {
+	case errors.As(err, &re):
 		writeError(w, re.status, re.code, re.msg)
-		return
+	case errors.As(err, &pe):
+		writeError(w, http.StatusForbidden, "protected", pe.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 	}
-	writeError(w, http.StatusInternalServerError, "internal", err.Error())
 }
 
 // decode reads a JSON or YAML request body into v. Unknown fields are rejected, so a typo

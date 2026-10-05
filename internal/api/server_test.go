@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/abbyck/workloadguard/internal/guard"
 )
 
 func newTestServer(ready ReadyFunc) *Server {
-	return New(slog.New(slog.NewTextHandler(io.Discard, nil)), ready)
+	return New(slog.New(slog.NewTextHandler(io.Discard, nil)), ready, guard.New(guard.DefaultProtectedNamespaces, ""))
 }
 
 func ok(context.Context) error { return nil }
@@ -160,5 +162,16 @@ func TestDecode(t *testing.T) {
 				t.Errorf("status = %d, want %d (err: %v)", rec.Code, tt.wantStatus, decodeErr)
 			}
 		})
+	}
+}
+
+func TestProtectedErrorIs403(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeRequestError(rec, &guard.ProtectedError{Kind: "Namespace", Name: "kube-system", Reason: "in the protected namespace list"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if code := decodeError(t, rec); code != "protected" {
+		t.Errorf("code = %q, want protected", code)
 	}
 }

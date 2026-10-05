@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/abbyck/workloadguard/internal/guard"
 )
 
 // ReadyFunc reports whether the service can do its job, i.e. reach the Kubernetes API.
@@ -19,10 +21,11 @@ const readyTimeout = 2 * time.Second
 type Server struct {
 	log   *slog.Logger
 	ready ReadyFunc
+	guard *guard.Guard
 }
 
-func New(log *slog.Logger, ready ReadyFunc) *Server {
-	return &Server{log: log, ready: ready}
+func New(log *slog.Logger, ready ReadyFunc, g *guard.Guard) *Server {
+	return &Server{log: log, ready: ready, guard: g}
 }
 
 // Handler returns the API with all middleware applied.
